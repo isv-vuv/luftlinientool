@@ -19,16 +19,13 @@
 
 import pandas as pd
 import logging
+import webbrowser
 import numpy as np
 from scipy.spatial import Delaunay
 from pathlib import Path
 from math import radians
 import win32com.client as com
-import importlib
-try:
-    from language_management import Translator
-except ImportError:
-    Translator = importlib.import_module("05_language_management").Translator
+from language_management import Translator
 
 
 # ====== general, useful functions =====
@@ -634,7 +631,7 @@ class DirectLineNetworkCalculator:
     # @param visum: optional visum instance. Default None
     # @param list_cfl: optional set of CFL. Default: None (all of the object)
     def _resolve_visum_output_dir(self, path_type_id: int, subdir_name: str) -> Path:
-        """Resolve canonical Visum output directory (e.g. processed/visum/mtx or net), never ver/mtx."""
+        """Resolve output directory: explicit path_output, else <folder of the open version file>/<subdir>."""
         if self.path_output is not None:
             return Path(self.path_output)
         if self.visum is not None:
@@ -647,15 +644,10 @@ class DirectLineNetworkCalculator:
             try:
                 doc_name = str(self.visum.UserPreferences.DocumentName or "").strip()
                 if doc_name:
-                    doc_parent = Path(doc_name).resolve().parent
-                    visum_root = doc_parent.parent if doc_parent.name.lower() == "ver" else doc_parent
-                    return visum_root / subdir_name
+                    return Path(doc_name).resolve().parent / subdir_name
             except Exception:
                 pass
-        cwd = Path.cwd()
-        if cwd.name.lower() == "ver":
-            return cwd.parent / subdir_name
-        return cwd / subdir_name
+        return Path.cwd() / subdir_name
 
     def export_matrix(self, list_cfl=None, overwrite_existing: bool = True):
         # If visum instance recognised:
@@ -706,7 +698,7 @@ class DirectLineNetworkCalculator:
                     target_matrix_name = f"{name_matrix}_{suffix}"
                     existing_matrix_no = None
 
-            # get output directory (always processed/visum/mtx when inside a Visum project, never ver/mtx)
+            # get output directory (folder of the open version file)
             path_mat = self._resolve_visum_output_dir(69, "mtx")
             path_mat.mkdir(parents=True, exist_ok=True)
             path_mat_file = path_mat / f"{target_matrix_name}.mtx"

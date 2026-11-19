@@ -38,8 +38,6 @@ class Translator:
         if dict_path is None or not Path(dict_path).exists():
             script_dir = Path(__file__).resolve().parent
             candidates = [
-                script_dir.parent / "helper_files" / "translations.json",
-                script_dir.parent / "helper_files" / "Translations.json",
                 script_dir / "translations.json",
                 script_dir / "Translations.json",
                 Path.cwd() / "translations.json",

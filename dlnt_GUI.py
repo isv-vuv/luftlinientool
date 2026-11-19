@@ -1,4 +1,4 @@
-## @package dlnt_GUI
+﻿## @package dlnt_GUI
 # @brief Graphical User Interface for the Direct-Line Network Tool
 #
 # This class provides a graphical interface for the Direct Line Network Tool (DLNT),
@@ -31,30 +31,13 @@
 # Not all methods of the calculator class are available in the GUI.
 
 
-import importlib
 import sys
 from pathlib import Path
 
 
-def _resolve_pando_visum_dirs() -> tuple[Path | None, Path | None]:
-    """Locate PANDO's core/scripts/visum/{scripts,helper_files} from either core or a project's processed/visum/script."""
-    here = Path(__file__).resolve().parent
-    # Case 1: running directly inside core/scripts/visum/scripts
-    if (here / "05_cfl_directlinenetwork_tool.py").is_file():
-        return here, here.parent / "helper_files"
-    # Case 2: running from <PANDO_ROOT>/projects/<project>/processed/visum/script
-    for ancestor in here.parents:
-        cand_scripts = ancestor / "core" / "scripts" / "visum" / "scripts"
-        if (cand_scripts / "05_cfl_directlinenetwork_tool.py").is_file():
-            return cand_scripts, ancestor / "core" / "scripts" / "visum" / "helper_files"
-    return None, None
-
-
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_PANDO_SCRIPTS_DIR, _PANDO_HELPER_DIR = _resolve_pando_visum_dirs()
-for _p in (_SCRIPT_DIR, _PANDO_SCRIPTS_DIR, _PANDO_HELPER_DIR):
-    if _p is not None and _p.is_dir() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 import wx
 import wx.grid
@@ -64,40 +47,17 @@ import json
 import os
 import warnings
 
-try:
-    dlnt = importlib.import_module("05_cfl_directlinenetwork_tool")
-except ImportError:
-    import cfl_directlinenetwork_tool as dlnt
-
-try:
-    Translator = importlib.import_module("05_language_management").Translator
-except ImportError:
-    from language_management import Translator
+import cfl_directlinenetwork_tool as dlnt
+from language_management import Translator
 
 
 def _configure_file_logging(visum=None) -> Path:
-    """Route all logging strictly to processed/visum/log/dlnt_GUI.log.
+    """Route all logging to dlnt_GUI.log next to this script (file only).
 
     Removing StreamHandlers prevents Visum's embedded Python from intercepting
     sys.stderr writes as modal Warning popups or deadlocking the wx UI loop.
     """
-    log_name = Path(__file__).name.replace(".py", ".log")
-    script_parent = Path(__file__).resolve().parent
-    log_dir = script_parent.parent / "log"
-    if script_parent.name.lower() != "script" and visum is not None:
-        try:
-            doc_name = str(visum.UserPreferences.DocumentName or "").strip()
-            if doc_name:
-                doc_parent = Path(doc_name).resolve().parent
-                visum_root = doc_parent.parent if doc_parent.name.lower() == "ver" else doc_parent
-                log_dir = visum_root / "log"
-        except Exception:
-            pass
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        path_logfile = log_dir / log_name
-    except OSError:
-        path_logfile = Path(log_name)
+    path_logfile = _SCRIPT_DIR / Path(__file__).name.replace(".py", ".log")
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -124,29 +84,29 @@ def _configure_file_logging(visum=None) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# PANDO Design System Palette & Custom Widgets (matches core/app/app_qt/main_window.py)
+# UI palette & custom flat widgets
 # ---------------------------------------------------------------------------
-_PANDO_BG          = wx.Colour(248, 250, 252)  # #f8fafc
-_PANDO_CARD        = wx.Colour(255, 255, 255)  # #ffffff
-_PANDO_BORDER      = wx.Colour(203, 213, 225)  # #cbd5e1
-_PANDO_BORDER_SOFT = wx.Colour(226, 232, 240)  # #e2e8f0
-_PANDO_TEXT        = wx.Colour(15, 23, 42)     # #0f172a
-_PANDO_BODY        = wx.Colour(51, 65, 85)     # #334155
-_PANDO_MUTED       = wx.Colour(100, 116, 139)  # #64748b
-_PANDO_BLUE        = wx.Colour(37, 99, 235)    # #2563eb
-_PANDO_BLUE_HOVER  = wx.Colour(29, 78, 216)    # #1d4ed8
-_PANDO_GREEN       = wx.Colour(16, 185, 129)   # #10b981
-_PANDO_GREEN_HOVER = wx.Colour(5, 150, 105)    # #059669
-_PANDO_HOVER_BG    = wx.Colour(241, 245, 249)  # #f1f5f9
-_PANDO_DANGER      = wx.Colour(185, 28, 28)    # #b91c1c
-_PANDO_DANGER_BDR  = wx.Colour(254, 202, 202)  # #fecaca
-_PANDO_DANGER_HOV  = wx.Colour(254, 242, 242)  # #fef2f2
-_PANDO_DISABLED_BG = wx.Colour(248, 250, 252)  # #f8fafc
-_PANDO_DISABLED_FG = wx.Colour(148, 163, 184)  # #94a3b8
+_UI_BG          = wx.Colour(248, 250, 252)  # #f8fafc
+_UI_CARD        = wx.Colour(255, 255, 255)  # #ffffff
+_UI_BORDER      = wx.Colour(203, 213, 225)  # #cbd5e1
+_UI_BORDER_SOFT = wx.Colour(226, 232, 240)  # #e2e8f0
+_UI_TEXT        = wx.Colour(15, 23, 42)     # #0f172a
+_UI_BODY        = wx.Colour(51, 65, 85)     # #334155
+_UI_MUTED       = wx.Colour(100, 116, 139)  # #64748b
+_UI_BLUE        = wx.Colour(37, 99, 235)    # #2563eb
+_UI_BLUE_HOVER  = wx.Colour(29, 78, 216)    # #1d4ed8
+_UI_GREEN       = wx.Colour(16, 185, 129)   # #10b981
+_UI_GREEN_HOVER = wx.Colour(5, 150, 105)    # #059669
+_UI_HOVER_BG    = wx.Colour(241, 245, 249)  # #f1f5f9
+_UI_DANGER      = wx.Colour(185, 28, 28)    # #b91c1c
+_UI_DANGER_BDR  = wx.Colour(254, 202, 202)  # #fecaca
+_UI_DANGER_HOV  = wx.Colour(254, 242, 242)  # #fef2f2
+_UI_DISABLED_BG = wx.Colour(248, 250, 252)  # #f8fafc
+_UI_DISABLED_FG = wx.Colour(148, 163, 184)  # #94a3b8
 
 
-class _PandoButton(wx.Panel):
-    """Flat, rounded PANDO-style button with hover/disabled states (drop-in for wx.Button)."""
+class _FlatButton(wx.Panel):
+    """Flat, rounded button with hover/disabled states (drop-in for wx.Button)."""
 
     def __init__(self, parent, label: str = "", *, variant: str = "secondary", height: int = 38):
         super().__init__(parent, style=wx.NO_BORDER)
@@ -181,18 +141,18 @@ class _PandoButton(wx.Panel):
 
     def _palette(self):
         if not self._enabled:
-            return _PANDO_DISABLED_BG, _PANDO_BORDER_SOFT, _PANDO_DISABLED_FG, False
+            return _UI_DISABLED_BG, _UI_BORDER_SOFT, _UI_DISABLED_FG, False
         if self._variant == "green":
-            bg = _PANDO_GREEN_HOVER if (self._hover or self._pressed) else _PANDO_GREEN
-            return bg, _PANDO_GREEN_HOVER, _PANDO_CARD, True
+            bg = _UI_GREEN_HOVER if (self._hover or self._pressed) else _UI_GREEN
+            return bg, _UI_GREEN_HOVER, _UI_CARD, True
         if self._variant == "blue":
-            bg = _PANDO_BLUE_HOVER if (self._hover or self._pressed) else _PANDO_BLUE
-            return bg, _PANDO_BLUE_HOVER, _PANDO_CARD, True
+            bg = _UI_BLUE_HOVER if (self._hover or self._pressed) else _UI_BLUE
+            return bg, _UI_BLUE_HOVER, _UI_CARD, True
         if self._variant == "danger":
-            bg = _PANDO_DANGER_HOV if (self._hover or self._pressed) else _PANDO_CARD
-            return bg, _PANDO_DANGER_BDR, _PANDO_DANGER, False
-        bg = _PANDO_HOVER_BG if (self._hover or self._pressed) else _PANDO_CARD
-        return bg, _PANDO_BORDER, _PANDO_BODY, False
+            bg = _UI_DANGER_HOV if (self._hover or self._pressed) else _UI_CARD
+            return bg, _UI_DANGER_BDR, _UI_DANGER, False
+        bg = _UI_HOVER_BG if (self._hover or self._pressed) else _UI_CARD
+        return bg, _UI_BORDER, _UI_BODY, False
 
     def _on_enter(self, _evt):
         if self._enabled:
@@ -241,8 +201,8 @@ class _PandoButton(wx.Panel):
             pass
 
 
-class _PandoProgressBar(wx.Panel):
-    """Slim full-width PANDO progress bar (#e2e8f0 track, #2563eb fill)."""
+class _FlatProgressBar(wx.Panel):
+    """Slim full-width progress bar (#e2e8f0 track, #2563eb fill)."""
 
     def __init__(self, parent, height: int = 6):
         super().__init__(parent, style=wx.NO_BORDER)
@@ -258,17 +218,17 @@ class _PandoProgressBar(wx.Panel):
     def _on_paint(self, _evt):
         dc = wx.AutoBufferedPaintDC(self)
         w, h = self.GetClientSize()
-        dc.SetBackground(wx.Brush(_PANDO_BORDER_SOFT))
+        dc.SetBackground(wx.Brush(_UI_BORDER_SOFT))
         dc.Clear()
         if self._value > 0:
             fill_w = int(round(w * (self._value / 100.0)))
             dc.SetPen(wx.TRANSPARENT_PEN)
-            dc.SetBrush(wx.Brush(_PANDO_BLUE))
+            dc.SetBrush(wx.Brush(_UI_BLUE))
             dc.DrawRectangle(0, 0, fill_w, h)
 
 
-class _PandoSegmentedToggle(wx.Panel):
-    """Modern PANDO segmented pill toggle (e.g. EN | DE) for instant language switching."""
+class _SegmentedToggle(wx.Panel):
+    """Modern segmented pill toggle (e.g. EN | DE) for instant language switching."""
 
     def __init__(self, parent, options: list[tuple[str, str]], selected_key: str, on_change, height: int = 34):
         super().__init__(parent, style=wx.NO_BORDER)
@@ -323,12 +283,12 @@ class _PandoSegmentedToggle(wx.Panel):
         try:
             dc = wx.AutoBufferedPaintDC(self)
             w, h = self.GetClientSize()
-            dc.SetBackground(wx.Brush(_PANDO_CARD))
+            dc.SetBackground(wx.Brush(_UI_CARD))
             dc.Clear()
 
             # Outer pill track
-            dc.SetPen(wx.Pen(_PANDO_BORDER, 1))
-            dc.SetBrush(wx.Brush(_PANDO_BG))
+            dc.SetPen(wx.Pen(_UI_BORDER, 1))
+            dc.SetBrush(wx.Brush(_UI_BG))
             dc.DrawRoundedRectangle(0, 0, w, h, 8)
 
             n = max(1, len(self._options))
@@ -343,7 +303,7 @@ class _PandoSegmentedToggle(wx.Panel):
                 is_sel = (key == self._selected)
                 if is_sel:
                     dc.SetPen(wx.TRANSPARENT_PEN)
-                    dc.SetBrush(wx.Brush(_PANDO_BLUE))
+                    dc.SetBrush(wx.Brush(_UI_BLUE))
                     dc.DrawRoundedRectangle(sx, pad, sw, h - 2 * pad, 6)
                     dc.SetFont(font_active)
                     dc.SetTextForeground(wx.Colour(255, 255, 255))
@@ -353,21 +313,21 @@ class _PandoSegmentedToggle(wx.Panel):
                         dc.SetBrush(wx.Brush(wx.Colour(226, 232, 240)))
                         dc.DrawRoundedRectangle(sx, pad, sw, h - 2 * pad, 6)
                     dc.SetFont(font_normal)
-                    dc.SetTextForeground(_PANDO_BODY)
+                    dc.SetTextForeground(_UI_BODY)
                 tw, th = dc.GetTextExtent(label)
                 dc.DrawText(label, sx + (sw - tw) // 2, (h - th) // 2)
         except Exception:
             logging.exception("Error painting segmented toggle")
 
 
-def _make_pando_card(parent, title: str):
-    """Create a PANDO-styled white card with a crisp 1px border and bold header."""
+def _make_card(parent, title: str):
+    """Create a white card with a crisp 1px border and bold header."""
     border_wrap = wx.Panel(parent)
-    border_wrap.SetBackgroundColour(_PANDO_BORDER_SOFT)
+    border_wrap.SetBackgroundColour(_UI_BORDER_SOFT)
     wrap_sizer = wx.BoxSizer(wx.VERTICAL)
 
     card = wx.Panel(border_wrap)
-    card.SetBackgroundColour(_PANDO_CARD)
+    card.SetBackgroundColour(_UI_CARD)
     card_sizer = wx.BoxSizer(wx.VERTICAL)
 
     title_lbl = wx.StaticText(card, -1, title)
@@ -375,13 +335,13 @@ def _make_pando_card(parent, title: str):
     t_font.SetPointSize(10)
     t_font.SetWeight(wx.FONTWEIGHT_BOLD)
     title_lbl.SetFont(t_font)
-    title_lbl.SetForegroundColour(_PANDO_TEXT)
+    title_lbl.SetForegroundColour(_UI_TEXT)
     card_sizer.Add(title_lbl, 0, wx.LEFT | wx.RIGHT | wx.TOP, 14)
 
     divider = wx.Panel(card, size=(-1, 1), style=wx.NO_BORDER)
     divider.SetMinSize((-1, 1))
     divider.SetMaxSize((-1, 1))
-    divider.SetBackgroundColour(_PANDO_BORDER_SOFT)
+    divider.SetBackgroundColour(_UI_BORDER_SOFT)
     card_sizer.Add(divider, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
     content_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -446,15 +406,15 @@ class _GridIntProxy:
     def Enable(self, enable: bool = True):
         self._grid.SetReadOnly(self._row, self._col, not bool(enable))
         self._grid.SetCellBackgroundColour(
-            self._row, self._col, _PANDO_CARD if enable else _PANDO_DISABLED_BG
+            self._row, self._col, _UI_CARD if enable else _UI_DISABLED_BG
         )
         self._grid.SetCellTextColour(
-            self._row, self._col, _PANDO_TEXT if enable else _PANDO_DISABLED_FG
+            self._row, self._col, _UI_TEXT if enable else _UI_DISABLED_FG
         )
 
 
 class _CenteredBoolRenderer(wx.grid.GridCellRenderer):
-    """Draws a crisp, pixel-perfect centered PANDO checkbox inside column 0."""
+    """Draws a crisp, pixel-perfect centered checkbox inside column 0."""
 
     def Draw(self, grid, attr, dc, rect, row, col, isSelected):
         try:
@@ -469,15 +429,15 @@ class _CenteredBoolRenderer(wx.grid.GridCellRenderer):
             by = rect.y + (rect.height - box) // 2
 
             if checked:
-                dc.SetPen(wx.Pen(_PANDO_BLUE, 1))
-                dc.SetBrush(wx.Brush(_PANDO_BLUE))
+                dc.SetPen(wx.Pen(_UI_BLUE, 1))
+                dc.SetBrush(wx.Brush(_UI_BLUE))
                 dc.DrawRoundedRectangle(bx, by, box, box, 3)
                 dc.SetPen(wx.Pen(wx.Colour(255, 255, 255), 2))
                 dc.DrawLine(bx + 3, by + 8, bx + 6, by + 11)
                 dc.DrawLine(bx + 6, by + 11, bx + 12, by + 4)
             else:
-                dc.SetPen(wx.Pen(_PANDO_BORDER, 1))
-                dc.SetBrush(wx.Brush(_PANDO_CARD))
+                dc.SetPen(wx.Pen(_UI_BORDER, 1))
+                dc.SetBrush(wx.Brush(_UI_CARD))
                 dc.DrawRoundedRectangle(bx, by, box, box, 3)
         except Exception:
             logging.exception("Error drawing centered checkbox cell")
@@ -666,24 +626,23 @@ class DirectLineNetworkToolFrame(wx.Frame):
         self.event_set_default()
 
     ## Sets up the layout of the main window.
-    #  Creates and arranges all UI components in PANDO style with full-width progress bar.
+    #  Creates and arranges all UI components with a full-width progress bar.
     def __set_layout__(self):
-        self.SetBackgroundColour(_PANDO_BG)
+        self.SetBackgroundColour(_UI_BG)
         self.panel = wx.Panel(self)
-        self.panel.SetBackgroundColour(_PANDO_BG)
+        self.panel.SetBackgroundColour(_UI_BG)
 
         root_sizer = wx.BoxSizer(wx.VERTICAL)
 
         # ---- Main content (directly inside panel, no redundant header or Notebook tab) ----
-        self.notebook = None
         self.tabMain = MainTab(self.panel, self.translator)
 
-        # ---- Right PANDO action card ----
-        side_wrap, self.side_panel, self._lbl_side_title, side_sizer = _make_pando_card(
+        # ---- Right action card ----
+        side_wrap, self.side_panel, self._lbl_side_title, side_sizer = _make_card(
             self.panel, "Tools"
         )
         _lang_opts = [("en", "English"), ("de", "Deutsch")]
-        self.lang_toggle = _PandoSegmentedToggle(
+        self.lang_toggle = _SegmentedToggle(
             self.side_panel,
             _lang_opts,
             selected_key=self.translator.get_selected_language(),
@@ -692,11 +651,11 @@ class DirectLineNetworkToolFrame(wx.Frame):
         )
         side_sizer.Add(self.lang_toggle, 0, wx.EXPAND | wx.BOTTOM, 12)
 
-        self.btn_side_reset = _PandoButton(self.side_panel, self.translator.translate('menu_reset_calculations'), height=36)
-        self.btn_side_defaults = _PandoButton(self.side_panel, self.translator.translate('menu_set_defaults'), height=36)
-        self.btn_side_info = _PandoButton(self.side_panel, self.translator.translate('menu_info'), height=36)
-        self.btn_side_filter = _PandoButton(self.side_panel, self.translator.translate('toolbar_filter_inserted_links'), height=36)
-        self.btn_side_delete = _PandoButton(self.side_panel, self.translator.translate('toolbar_delete_inserted_links'), variant="danger", height=36)
+        self.btn_side_reset = _FlatButton(self.side_panel, self.translator.translate('menu_reset_calculations'), height=36)
+        self.btn_side_defaults = _FlatButton(self.side_panel, self.translator.translate('menu_set_defaults'), height=36)
+        self.btn_side_info = _FlatButton(self.side_panel, self.translator.translate('menu_info'), height=36)
+        self.btn_side_filter = _FlatButton(self.side_panel, self.translator.translate('toolbar_filter_inserted_links'), height=36)
+        self.btn_side_delete = _FlatButton(self.side_panel, self.translator.translate('toolbar_delete_inserted_links'), variant="danger", height=36)
 
         for btn in (self.btn_side_reset,
                     self.btn_side_defaults, self.btn_side_info, self.btn_side_filter, self.btn_side_delete):
@@ -710,8 +669,8 @@ class DirectLineNetworkToolFrame(wx.Frame):
         body_sizer.Add(side_wrap, 0, wx.EXPAND | wx.TOP | wx.RIGHT | wx.BOTTOM, 12)
         root_sizer.Add(body_sizer, 1, wx.EXPAND)
 
-        # ---- Full-width slim PANDO progress bar across the entire window ----
-        self.progress_bar = _PandoProgressBar(self.panel, height=5)
+        # ---- Full-width slim progress bar across the entire window ----
+        self.progress_bar = _FlatProgressBar(self.panel, height=5)
         root_sizer.Add(self.progress_bar, 0, wx.EXPAND)
 
         self.panel.SetSizer(root_sizer)
@@ -823,7 +782,7 @@ class DirectLineNetworkToolFrame(wx.Frame):
     #  and updates the status bar to indicate completion.
     #  @param event The event object.
     def set_progress(self, current: int, total: int, message: str = ""):
-        """Update the full-width PANDO progress bar and status bar without re-entering Visum's UI loop."""
+        """Update the full-width progress bar and status bar without re-entering Visum's UI loop."""
         gauge = getattr(self, "progress_bar", None)
         if gauge is not None:
             total = max(1, int(total))
@@ -927,11 +886,7 @@ class DirectLineNetworkToolFrame(wx.Frame):
     ## Event handler for the Info button.
     #  @param event The event object.
     def event_info(self, event):
-        doc_base = (
-            _PANDO_HELPER_DIR
-            if (_PANDO_HELPER_DIR is not None and (_PANDO_HELPER_DIR / "documentation").is_dir())
-            else Path(__file__).parent
-        )
+        doc_base = _SCRIPT_DIR
         logging.info(doc_base)
         HelpPopUp(self, self.translator, doc_base)
 
@@ -940,9 +895,7 @@ class DirectLineNetworkToolFrame(wx.Frame):
     #  and updates the status bar.
     #  @param event The event object.
     def event_reset(self, event):
-        if self.dln_calculator is None:
-            a = 1  # todo
-        else:
+        if self.dln_calculator is not None:
             self.dln_calculator.init_results()
 
         self.SetStatusText(self.translator.translate('status_results_deleted_may_reimport'))
@@ -1173,7 +1126,6 @@ class MainTab(wx.Panel):
 
         self.translator = translator
         # Initialize instance attributes for widgets and sizers that need to be updated
-        self.hbox1 = None
         self.gridbagsizer1 = None
         self.static_text_centrality = None
         self.static_text_origin = None
@@ -1182,14 +1134,12 @@ class MainTab(wx.Panel):
         self.static_text_attr_cfl = None
         self.static_text_exchange_fcn = None
         self.static_text_supply_fcn = None
-        self.static_text_visum_as = None
         self.static_text_dist_fcn_label = None
         self.btn_export_master = None # Ensure it's initialized
         self._box_zone_attrs = None
         self._box_cfl = None
         self._box_export = None
         self.static_text_status_header = None
-        self.status_labels = {}          # {cfl_key: wx.StaticText}
         self._cfl_status = {}            # {cfl_key: str}  internal state
         self.btn_calculate = None        # new Calculate button
 
@@ -1201,11 +1151,11 @@ class MainTab(wx.Panel):
     #  connectivity function level parameters, status column, calculate button,
     #  and a separate export section.
     def __set_layout__(self):
-        self.SetBackgroundColour(_PANDO_BG)
+        self.SetBackgroundColour(_UI_BG)
         vbox_outer = wx.BoxSizer(wx.VERTICAL)
 
         # ---- Card 1: Zone Attribute Selection (3 strictly equal-width columns) ----
-        zone_wrap, zone_card, self._box_zone_attrs, zone_body = _make_pando_card(
+        zone_wrap, zone_card, self._box_zone_attrs, zone_body = _make_card(
             self, self.translator.translate('zone_attributes')
         )
         zone_grid = wx.GridSizer(rows=1, cols=3, vgap=0, hgap=16)
@@ -1237,7 +1187,7 @@ class MainTab(wx.Panel):
             (self.static_text_origin, self.cb_origin),
             (self.static_text_destination, self.cb_destination),
         ):
-            lbl.SetForegroundColour(_PANDO_BODY)
+            lbl.SetForegroundColour(_UI_BODY)
             cb.SetMinSize((-1, 30))
             col_box = wx.BoxSizer(wx.VERTICAL)
             col_box.Add(lbl, 0, wx.BOTTOM, 6)
@@ -1246,10 +1196,9 @@ class MainTab(wx.Panel):
             zone_grid.Add(col_box, 1, wx.EXPAND)
 
         zone_body.Add(zone_grid, 0, wx.EXPAND)
-        self.hbox1 = zone_wrap
 
         # ---- Card 2: CFL/VFS Settings (Visum-style table with multi-cell editing) ----
-        cfl_wrap, cfl_card, self._box_cfl, self._gridbox_sizer = _make_pando_card(
+        cfl_wrap, cfl_card, self._box_cfl, self._gridbox_sizer = _make_card(
             self, self.translator.translate('cfl_vfs_settings')
         )
 
@@ -1268,7 +1217,7 @@ class MainTab(wx.Panel):
 
         # Crisp 1px flat border around the entire grid (ensures all 4 sides incl. left border are visible, no 3D shadow)
         grid_border = wx.Panel(cfl_card, style=wx.NO_BORDER)
-        grid_border.SetBackgroundColour(_PANDO_BORDER)
+        grid_border.SetBackgroundColour(_UI_BORDER)
         grid_border_sizer = wx.BoxSizer(wx.VERTICAL)
 
         self.cfl_grid = wx.grid.Grid(grid_border, style=wx.BORDER_NONE)
@@ -1282,15 +1231,15 @@ class MainTab(wx.Panel):
         self.cfl_grid.SetRowLabelSize(0)
         self.cfl_grid.SetColLabelSize(46)
         self.cfl_grid.SetDefaultRowSize(32, True)
-        self.cfl_grid.SetGridLineColour(_PANDO_BORDER_SOFT)
+        self.cfl_grid.SetGridLineColour(_UI_BORDER_SOFT)
         self.cfl_grid.SetLabelBackgroundColour(wx.Colour(226, 232, 240))
-        self.cfl_grid.SetLabelTextColour(_PANDO_TEXT)
+        self.cfl_grid.SetLabelTextColour(_UI_TEXT)
         self.cfl_grid.SetSelectionBackground(wx.Colour(219, 234, 254))
-        self.cfl_grid.SetSelectionForeground(_PANDO_TEXT)
-        self.cfl_grid.SetDefaultCellBackgroundColour(_PANDO_CARD)
-        self.cfl_grid.SetDefaultCellTextColour(_PANDO_TEXT)
+        self.cfl_grid.SetSelectionForeground(_UI_TEXT)
+        self.cfl_grid.SetDefaultCellBackgroundColour(_UI_CARD)
+        self.cfl_grid.SetDefaultCellTextColour(_UI_TEXT)
         self.cfl_grid.SetDefaultCellAlignment(wx.ALIGN_CENTER, wx.ALIGN_CENTER)
-        self.cfl_grid.SetCellHighlightColour(_PANDO_BLUE)
+        self.cfl_grid.SetCellHighlightColour(_UI_BLUE)
         self.cfl_grid.SetCellHighlightPenWidth(1)
 
         # Custom flat, shadow-free two-line header painter (bold title + thin subtitle)
@@ -1310,13 +1259,12 @@ class MainTab(wx.Panel):
         self.buttons_cfl_value = {}
         self.buttons_value_k_neighbor_cfl = {}
         self.buttons_value_n_supplier = {}
-        self.status_labels = {}
 
         cfl_num_font = self.cfl_grid.GetDefaultCellFont()
         cfl_num_font.SetWeight(wx.FONTWEIGHT_BOLD)
 
         for row_idx, cfl_key in enumerate(self._cfl_keys):
-            # Col 0: Active checkbox (centered PANDO style)
+            # Col 0: Active checkbox (centered style)
             self.cfl_grid.SetCellRenderer(row_idx, 0, _CenteredBoolRenderer())
             self.cfl_grid.SetCellEditor(row_idx, 0, wx.grid.GridCellBoolEditor())
             self.cfl_grid.SetCellAlignment(row_idx, 0, wx.ALIGN_CENTER, wx.ALIGN_CENTER)
@@ -1361,17 +1309,17 @@ class MainTab(wx.Panel):
         calc_div = wx.Panel(cfl_card, size=(-1, 1), style=wx.NO_BORDER)
         calc_div.SetMinSize((-1, 1))
         calc_div.SetMaxSize((-1, 1))
-        calc_div.SetBackgroundColour(_PANDO_BORDER_SOFT)
+        calc_div.SetBackgroundColour(_UI_BORDER_SOFT)
         self._gridbox_sizer.Add(calc_div, 0, wx.EXPAND | wx.BOTTOM, 10)
 
-        # --- Bottom strip: compact muted distance info text + PANDO green Calculate button ---
+        # --- Bottom strip: compact muted distance info text + green Calculate button ---
         self.static_text_dist_fcn_label = wx.StaticText(cfl_card, -1, self.translator.translate('label_distance_calculation_function'))
         d_font = self.static_text_dist_fcn_label.GetFont()
         d_font.SetPointSize(8)
         self.static_text_dist_fcn_label.SetFont(d_font)
-        self.static_text_dist_fcn_label.SetForegroundColour(_PANDO_MUTED)
+        self.static_text_dist_fcn_label.SetForegroundColour(_UI_MUTED)
 
-        self.btn_calculate = _PandoButton(cfl_card, self.translator.translate('btn_calculate'), variant="green", height=40)
+        self.btn_calculate = _FlatButton(cfl_card, self.translator.translate('btn_calculate'), variant="green", height=40)
         self.btn_calculate.SetMinSize((200, 40))
 
         _bottom_strip = wx.BoxSizer(wx.HORIZONTAL)
@@ -1380,32 +1328,31 @@ class MainTab(wx.Panel):
         self._gridbox_sizer.Add(_bottom_strip, 0, wx.EXPAND)
 
         # ---- Card 3: Export to Visum ----
-        export_wrap, export_card, self._box_export, self._export_sizer = _make_pando_card(
+        export_wrap, export_card, self._box_export, self._export_sizer = _make_card(
             self, self.translator.translate('export_to_visum_section')
         )
-        self.static_text_visum_as = None
 
         _btn_size = (185, 40)
-        self.btn_export_mtx = _PandoButton(export_card, self.translator.translate('btn_export_mtx'), variant="secondary", height=40)
+        self.btn_export_mtx = _FlatButton(export_card, self.translator.translate('btn_export_mtx'), variant="secondary", height=40)
         self.btn_export_mtx.SetMinSize(_btn_size)
         self._export_sizer.Add(self.btn_export_mtx, 0, wx.EXPAND | wx.BOTTOM, 6)
 
         self.cb_overwrite_matrix = wx.CheckBox(export_card, -1, self.translator.translate('setting_overwrite_matrix'))
         self.cb_overwrite_matrix.SetValue(True)
-        self.cb_overwrite_matrix.SetForegroundColour(_PANDO_BODY)
+        self.cb_overwrite_matrix.SetForegroundColour(_UI_BODY)
         self._export_sizer.Add(self.cb_overwrite_matrix, 0, wx.EXPAND | wx.LEFT | wx.BOTTOM, 12)
 
-        self.btn_export_net = _PandoButton(export_card, self.translator.translate('btn_export_net'), variant="secondary", height=40)
+        self.btn_export_net = _FlatButton(export_card, self.translator.translate('btn_export_net'), variant="secondary", height=40)
         self.btn_export_net.SetMinSize(_btn_size)
         self._export_sizer.Add(self.btn_export_net, 0, wx.EXPAND | wx.BOTTOM, 8)
 
-        self.btn_export_master = _PandoButton(export_card, self.translator.translate('setting_import_to_visum'), variant="blue", height=40)
+        self.btn_export_master = _FlatButton(export_card, self.translator.translate('setting_import_to_visum'), variant="blue", height=40)
         self.btn_export_master.cfl_level = 'all'
         self.btn_export_master.SetMinSize(_btn_size)
         self._export_sizer.Add(self.btn_export_master, 0, wx.EXPAND)
         self._export_sizer.AddStretchSpacer()
 
-        # Start with export buttons disabled in PANDO muted style
+        # Start with export buttons disabled in muted style
         self._set_export_buttons_state(enabled=False)
 
         # ---- Horizontal container: calculation card + export card ----
@@ -1490,7 +1437,7 @@ class MainTab(wx.Panel):
 
             title_font = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
             sub_font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-            border_pen = wx.Pen(_PANDO_BORDER, 1)
+            border_pen = wx.Pen(_UI_BORDER, 1)
 
             x = 0
             num_cols = self.cfl_grid.GetNumberCols()
@@ -1509,16 +1456,16 @@ class MainTab(wx.Panel):
                     top_y = max(2, (h - total_h) // 2)
 
                     dc.SetFont(title_font)
-                    dc.SetTextForeground(_PANDO_TEXT)
+                    dc.SetTextForeground(_UI_TEXT)
                     dc.DrawText(title, x + max(4, (cw - tw) // 2), top_y)
 
                     dc.SetFont(sub_font)
-                    dc.SetTextForeground(_PANDO_BODY)
+                    dc.SetTextForeground(_UI_BODY)
                     dc.DrawText(sub, x + max(4, (cw - sw) // 2), top_y + th + 2)
                 elif title:
                     dc.SetFont(title_font)
                     tw, th = dc.GetTextExtent(title)
-                    dc.SetTextForeground(_PANDO_TEXT)
+                    dc.SetTextForeground(_UI_TEXT)
                     dc.DrawText(title, x + max(4, (cw - tw) // 2), max(2, (h - th) // 2))
                 dc.DestroyClippingRegion()
 
@@ -1590,10 +1537,10 @@ class MainTab(wx.Panel):
 
     def _apply_row_visual_state(self, row: int, enabled: bool):
         """Apply uniform white (active) or soft gray (inactive) background across ALL 6 columns."""
-        bg = _PANDO_CARD if enabled else _PANDO_DISABLED_BG
+        bg = _UI_CARD if enabled else _UI_DISABLED_BG
         for col in range(6):
             self.cfl_grid.SetCellBackgroundColour(row, col, bg)
-        self.cfl_grid.SetCellTextColour(row, 1, _PANDO_TEXT if enabled else _PANDO_DISABLED_FG)
+        self.cfl_grid.SetCellTextColour(row, 1, _UI_TEXT if enabled else _UI_DISABLED_FG)
 
     def _toggle_row_active(self, row: int, enabled: bool):
         cfl_key = self._cfl_keys[row]
@@ -1670,8 +1617,8 @@ class MainTab(wx.Panel):
             'not_calculated': wx.Colour(180, 80, 0),
             'calculated':     wx.Colour(5, 150, 105),
             'outdated':       wx.Colour(180, 130, 0),
-            'exported':       _PANDO_BLUE,
-            'inactive':       _PANDO_MUTED,
+            'exported':       _UI_BLUE,
+            'inactive':       _UI_MUTED,
         }
         _keys = {
             'not_calculated': 'status_not_calculated',
@@ -1681,7 +1628,7 @@ class MainTab(wx.Panel):
             'inactive':       'status_inactive',
         }
         self.cfl_grid.SetCellValue(row_idx, 5, self.translator.translate(_keys[status]))
-        self.cfl_grid.SetCellTextColour(row_idx, 5, _colors.get(status, _PANDO_TEXT))
+        self.cfl_grid.SetCellTextColour(row_idx, 5, _colors.get(status, _UI_TEXT))
         self.cfl_grid.ForceRefresh()
 
     ## Enables or greys-out the export buttons depending on whether all active rows are 'calculated' or 'exported'.
@@ -1692,7 +1639,7 @@ class MainTab(wx.Panel):
         all_ready = active_statuses and all(s in ('calculated', 'exported') for s in active_statuses)
         self._set_export_buttons_state(all_ready)
 
-    ## Enables or disables (greys out) the export buttons in PANDO style.
+    ## Enables or disables (greys out) the export buttons in style.
     def _set_export_buttons_state(self, enabled: bool):
         for btn in (self.btn_export_mtx, self.btn_export_net, self.btn_export_master):
             btn.Enable(enabled)
@@ -1734,121 +1681,6 @@ class MainTab(wx.Panel):
 
         self.Layout()
         self.Refresh()
-
-
-## @class LogTab
-#  @brief Specifies the tab that displays log messages.
-#
-#  The `LogTab` class creates and manages the log tab of the application, which displays
-#  log messages from the application. It sets up logging handlers to capture and display
-#  messages in a text control.
-class LogTab(wx.Panel):
-    ## Initializes the log tab panel.
-    #  @param parent The parent window that contains this panel.
-    def __init__(self, parent):
-        wx.Panel.__init__(self, parent)
-        vbox = wx.BoxSizer(wx.VERTICAL)
-        vbox.Add(wx.StaticText(self, -1, "Message-Log"), 0, wx.ALL | wx.CENTER, 5)
-        # self.multiText = wx.TextCtrl(panel, -1, "", style=wx.TE_MULTILINE)
-        # self.multiText.SetInsertionPoint(0)
-        #
-        # vbox2.Add(self.multiText, 2, wx.ALIGN_CENTER | wx.ALL, 20)
-        #
-
-        # ==== Logging =====
-        log_name = Path(__file__).name.replace(".py", ".log")
-        log_dir = Path(__file__).resolve().parent.parent / "log"
-        try:
-            visum_log_dir = Path(self.visum.GetPath(57)) if self.visum is not None else None
-            if visum_log_dir and visum_log_dir.is_dir():
-                log_dir = visum_log_dir
-        except Exception:
-            pass
-        try:
-            log_dir.mkdir(parents=True, exist_ok=True)
-            path_logfile = log_dir / log_name
-        except OSError:
-            path_logfile = Path(log_name)
-        self.logger = logging.getLogger()
-        self.logger.setLevel(logging.INFO)
-        logger_format = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%d.%m.%Y %I:%M:%S %p")
-
-        # Clear any stale handlers (e.g. from prior runs in the same Visum Python session or
-        # StreamHandlers targeting Visum's redirected sys.stderr, which deadlocks wx.MainLoop).
-        for existing_h in self.logger.handlers[:]:
-            self.logger.removeHandler(existing_h)
-            try:
-                existing_h.close()
-            except Exception:
-                pass
-
-        # Output to Logfile & GUI Log-Tab (avoid sys.stderr StreamHandler inside Visum UI)
-        file_handler = logging.FileHandler(path_logfile, mode="w", encoding="utf-8")
-        file_handler.setFormatter(logger_format)
-        self.logger.addHandler(file_handler)
-
-        self.log = wx.TextCtrl(self, wx.ID_ANY, size=(700, 200),
-                               style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.EXPAND)
-        self.handler = WxTextCtrlHandler(self.log)
-        self.handler.setFormatter(logger_format)
-        self.logger.addHandler(self.handler)
-
-        vbox.Add(self.log, 1, wx.ALL | wx.EXPAND, 5)
-        self.SetSizer(vbox)
-
-        # Bind the panel destruction event to ensure cleanup
-        self.Bind(wx.EVT_WINDOW_DESTROY, self.on_close)
-
-    ## Handles the window destruction event.
-    #  Performs cleanup actions when the panel is destroyed, removing and closing log handlers.
-    #  @param event The window destruction event.
-    def on_close(self, event):
-        """ Perform any cleanup actions here """
-
-        # Remove and close the custom handler
-        self.logger.removeHandler(self.handler)
-        self.handler.close()
-
-        # Remove the file and stream handlers (optional if they need cleanup)
-        for handler in self.logger.handlers[:]:
-            if isinstance(handler, (logging.FileHandler, logging.StreamHandler)):
-                self.logger.removeHandler(handler)
-                handler.close()
-
-        event.Skip()  # Ensure the event propagates to the parent if needed
-
-    ## Destructor for the LogTab class.
-    #  Ensures the logger handler is removed when the object is destroyed.
-    def __del__(self):
-        self.logger.removeHandler(self.handler)
-
-
-    ## Updates the layout of the log tab.
-    #  @details This tab only needs to layout and refresh as it doesn't have dynamic text.
-    def refresh_gui_text(self):
-        # This tab only needs to layout and refresh as it doesn't have dynamic text.
-        self.Layout()
-        self.Refresh()
-
-
-## @class WxTextCtrlHandler
-#  @brief Handler for log commands that redirects log messages to a wxPython text control.
-#
-#  The `WxTextCtrlHandler` class is a custom logging handler that redirects log messages
-#  to a wxPython text control, allowing log messages to be displayed in the GUI.
-class WxTextCtrlHandler(logging.Handler):
-    ## Initializes the log handler.
-    #  @param ctrl The wxPython text control to which log messages will be redirected.
-    def __init__(self, ctrl):
-        logging.Handler.__init__(self)
-        self.ctrl = ctrl
-
-    ## Emits a log record to the text control.
-    #  @param record The log record to be emitted.
-    #  @details Formats the log record and writes it to the text control using CallAfter to ensure thread safety.
-    def emit(self, record):
-        s = self.format(record) + '\n'
-        wx.CallAfter(self.ctrl.WriteText, s)
 
 
 ## @class HelpPopUp
@@ -1917,12 +1749,7 @@ class HelpPopUp(wx.Frame):
 
 
 if __name__ == '__main__':
-    # Initialize translator using PANDO's helper_files/translations.json (with local fallback)
-    _translations_path = (
-        (_PANDO_HELPER_DIR / "translations.json")
-        if (_PANDO_HELPER_DIR is not None and (_PANDO_HELPER_DIR / "translations.json").is_file())
-        else (Path(__file__).parent / "translations.json")
-    )
+    _translations_path = _SCRIPT_DIR / "translations.json"
     translator = Translator(_translations_path, language="en")
     app = wx.App()
     frame = DirectLineNetworkToolFrame(translator)
