@@ -31,46 +31,60 @@ import pandas as pd
 # @brief Translation class to allow the user to choose the language
 class Translator:
     ## @brief Initializes the translator with the specified language.
-    # @param excel_path Path to the Excel file containing translations. Default: "Translations.xlsx"
-    # @param language Language code to use for translations. Default: "en"
-    def __init__(self, dict_path= Path.cwd() / "Translations.json", language: str="en"): #edit the translation excel path here
-
+    def __init__(self, dict_path=None, language: str="en"):
         self.translations = dict()
-        self.excel_path = dict_path
+        self._selected_language = language
+
+        if dict_path is None or not Path(dict_path).exists():
+            script_dir = Path(__file__).resolve().parent
+            candidates = [
+                script_dir.parent / "helper_files" / "translations.json",
+                script_dir.parent / "helper_files" / "Translations.json",
+                script_dir / "translations.json",
+                script_dir / "Translations.json",
+                Path.cwd() / "translations.json",
+                Path.cwd() / "Translations.json",
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    dict_path = cand
+                    break
+
+        self.excel_path = Path(dict_path) if dict_path and Path(dict_path).exists() else None
         self.load_translations()
-
-        self._selected_language = None
-
         self.update_selected_language(language)
 
-
-    ## @brief Loads translations from the Excel file.
+    ## @brief Loads translations from the Excel or JSON file.
     def load_translations(self):
-        if self.excel_path.suffix == ".json":
-            df = pd.read_json(self.excel_path, orient="index")
-        elif self.excel_path.suffix ==".xlsx":
-            df = pd.read_excel(self.excel_path, header=0, index_col=0) # visum-python can't open excel files
-        else:
-            logging.error(f"Unsupported file format for translations: {self.excel_path}")
+        if not self.excel_path or not self.excel_path.exists():
+            logging.debug(f"Translation file does not exist: {self.excel_path}")
             return
 
-        self.translations = df.to_dict()
+        try:
+            if self.excel_path.suffix == ".json":
+                df = pd.read_json(self.excel_path, orient="index")
+            elif self.excel_path.suffix == ".xlsx":
+                df = pd.read_excel(self.excel_path, header=0, index_col=0)
+            else:
+                logging.error(f"Unsupported file format for translations: {self.excel_path}")
+                return
 
+            self.translations = df.to_dict()
+        except Exception as e:
+            logging.warning(f"Could not load translations from {self.excel_path}: {e}")
 
     ## @brief Translates a key to the selected language.
-    # @param key The key to translate.
-    # @return The translated text or the original key if no translation is found.
     def translate(self, key):
+        if not self._selected_language or self._selected_language not in self.translations:
+            return key
         return self.translations.get(self._selected_language, {}).get(key, key)
 
-
     ## @brief Updates the selected language.
-    # @param language The language code to set as the selected language.
     def update_selected_language(self, language):
         if language in self.translations:
             self._selected_language = language
         else:
-            logging.error(f"Language {language} not found in translations.")
+            self._selected_language = language
 
 
     ## @brief Getter method for the selected language (optional, but good practice).

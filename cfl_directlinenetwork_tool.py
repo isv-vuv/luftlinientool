@@ -24,8 +24,11 @@ from scipy.spatial import Delaunay
 from pathlib import Path
 from math import radians
 import win32com.client as com
-import webbrowser
-from language_management import Translator
+import importlib
+try:
+    from language_management import Translator
+except ImportError:
+    Translator = importlib.import_module("05_language_management").Translator
 
 
 # ====== general, useful functions =====
@@ -280,8 +283,12 @@ class DirectLineNetworkCalculator:
             ## Table with zone data
             self.zones = pd.DataFrame(source.Net.Zones.GetMultipleAttributes(attr_zones, OnlyActive=False),
                                       columns=attr_zones)
-            set_active_zones = set(
-                np.array(source.Net.Zones.GetMultiAttValues("No", OnlyActive=use_filter), dtype=int)[:, 1])
+            raw_active_zones = source.Net.Zones.GetMultiAttValues("No", OnlyActive=use_filter)
+            arr_active = np.array(raw_active_zones, dtype=int)
+            if arr_active.ndim > 1 and arr_active.shape[1] > 1:
+                set_active_zones = set(arr_active[:, 1])
+            else:
+                set_active_zones = set(arr_active.ravel())
             self.zones["IsActive"] = self.zones["No"].isin(set_active_zones)
 
             logging.info("%s Zones loaded", len(self.zones))
@@ -367,21 +374,18 @@ class DirectLineNetworkCalculator:
     # @param use_zone_names: bool, if true, the zone names are used
     # @return df_set_zones: DataFrame with list object per zone and a column containing the number
     def adj_matrix_to_set_of_connected_zones(self, cfl, use_zone_names=True):
-        # convert matrix to dataframe
         if use_zone_names:
-            # use zone names
-            df = pd.DataFrame(self.matrices_cfl[cfl], index=self.zones["Name"], columns=self.zones["Name"])
+            col_labels = self.zones["Name"].tolist()
+            idx_labels = self.zones["Name"]
         else:
-            df = pd.DataFrame(self.matrices_cfl[cfl])
+            col_labels = list(range(len(self.zones)))
+            idx_labels = self.zones.index
 
-        # creates a dataframe that contains the zone names for each row of the matrix
-        df_zones = pd.DataFrame(df.index, index=df.index)
-        df_set_zones = df.mul(df.columns.tolist()).apply(lambda x: set(zone for zone in x if zone), axis=1).to_frame(
-            name="set zones")
+        matrix = self.matrices_cfl[cfl]
+        sets = [set(np.array(col_labels)[row > 0]) for row in matrix]
 
-        # get number of elements in set
+        df_set_zones = pd.DataFrame({"set zones": sets}, index=idx_labels)
         df_set_zones["no zones"] = df_set_zones["set zones"].apply(len)
-
         return df_set_zones
 
     ## Calculates which neighbours can be reached within n steps.
@@ -389,18 +393,21 @@ class DirectLineNetworkCalculator:
     # @param cfl: cfl to be analysed
     # @return matrix: Adjacency matrix for the reachable neighbours within the max-steps
     def calculate_reachability_max_steps(self, max_steps, cfl):
+        from scipy.sparse import csr_matrix
 
-        # Summiere alle Potenzen von 1 bis max_steps
-        matrix = sum(np.linalg.matrix_power(self.matrices_cfl[cfl], k)
-                     for k in range(1, max_steps + 1))
-
-        np.fill_diagonal(matrix, 0)
-
-        # Boolean casting for values greater than zero (binarisation).
-        # For an adjacency/reachability matrix, it is only relevant whether there is a connection, not how many.
-        matrix = (matrix > 0).astype(int)
-
-        return matrix
+        adj = csr_matrix(self.matrices_cfl[cfl], dtype=np.int8)
+        adj.data[:] = 1
+        acc = adj.copy()
+        cur = adj
+        for _ in range(2, int(max_steps) + 1):
+            cur = cur @ adj
+            if cur.nnz == 0:
+                break
+            cur.data[:] = 1
+            acc = acc + cur
+        acc.setdiag(0)
+        acc.eliminate_zeros()
+        return (acc > 0).toarray().astype(int)
 
     ## Calculates the adjacency matrix for each stored cfl of the instance.
     # This is the main calculation method that:
@@ -408,16 +415,25 @@ class DirectLineNetworkCalculator:
     # 2. Iterates through all cConnectivity function levels (cfl)
     # 3. Calculates the connections for each cfl
     # @return None - Results are stored in internal matrices
-    def calculate_main(self):
+    def calculate_main(self, on_progress=None):
         # initialize result matrices
         logging.info("Starting calculation for all CFLs.")
         self.init_results()
         logging.info("Adjacency matrices have been initialized.")
 
+        cfl_keys = list(self.cfl)
+        total = max(1, len(cfl_keys))
+        if on_progress:
+            on_progress(0, total, "")
+
         # loop over all cfl
-        for cfl in self.cfl:
+        for idx, cfl in enumerate(cfl_keys, start=1):
+            if on_progress:
+                on_progress(idx - 1, total, str(self.cfl_labels.get(cfl, cfl)))
             # calculate adjacency matrix for cfl
             self.calculate_cfl(cfl)
+            if on_progress:
+                on_progress(idx, total, str(self.cfl_labels.get(cfl, cfl)))
 
         logging.info("The calculation for all CFLs is complete.")
 
@@ -587,10 +603,6 @@ class DirectLineNetworkCalculator:
 
             logging.info(f'The calculation for {cfl} is completed.')
 
-            df_zones_info = self.adj_matrix_to_set_of_connected_zones(cfl)
-            df_zones_info["set zones"] = df_zones_info["set zones"].str.join(",")
-            # logging.info('\t' + df_zones_info.to_string().replace('\n', '\n\t'))
-
     ## Deletes nodes in Visum that do not connect any links.
     # All nodes without links are filtered & the active nodes are deleted.
     # The filter is then reset.
@@ -621,9 +633,33 @@ class DirectLineNetworkCalculator:
     # Existing matrices are overwritten.
     # @param visum: optional visum instance. Default None
     # @param list_cfl: optional set of CFL. Default: None (all of the object)
-    def export_matrix(self, list_cfl=None):
+    def _resolve_visum_output_dir(self, path_type_id: int, subdir_name: str) -> Path:
+        """Resolve canonical Visum output directory (e.g. processed/visum/mtx or net), never ver/mtx."""
+        if self.path_output is not None:
+            return Path(self.path_output)
+        if self.visum is not None:
+            try:
+                visum_dir = Path(self.visum.GetPath(path_type_id))
+                if visum_dir.is_dir() and visum_dir.name.lower() == subdir_name.lower():
+                    return visum_dir
+            except Exception:
+                pass
+            try:
+                doc_name = str(self.visum.UserPreferences.DocumentName or "").strip()
+                if doc_name:
+                    doc_parent = Path(doc_name).resolve().parent
+                    visum_root = doc_parent.parent if doc_parent.name.lower() == "ver" else doc_parent
+                    return visum_root / subdir_name
+            except Exception:
+                pass
+        cwd = Path.cwd()
+        if cwd.name.lower() == "ver":
+            return cwd.parent / subdir_name
+        return cwd / subdir_name
+
+    def export_matrix(self, list_cfl=None, overwrite_existing: bool = True):
         # If visum instance recognised:
-        # create & export data directly in visa (for networks with <1500 districts via SetValues otherwise using an mtx file in O-Fromat)
+        # create & export data directly in visum (for networks with <1500 zones via SetValues, otherwise via .mtx O-Format)
         # Otherwise: Save .mtx file
 
         if list_cfl is None:
@@ -649,28 +685,48 @@ class DirectLineNetworkCalculator:
                 # includes term regarding supply function
                 name_matrix = f"RIN_{cfl_label}_n={self.deg_neighbourhood_cfl[cfl]}_v={self.num_suppliers_cfl[cfl]}"
 
-            # get output directory (not used if matrix is written to Visum directly)
-            path_mat = self.path_output or Path.cwd() / 'mtx'
+            # Resolve target matrix in Visum (overwrite by NAME/CODE or create unique separate matrix)
+            target_matrix_name = name_matrix
+            existing_matrix_no = None
+            if self.visum is not None and self.visum.Net.Matrices.Count > 0:
+                raw_mats = self.visum.Net.Matrices.GetMultipleAttributes(["NO", "CODE", "NAME"])
+                existing_names_codes = set()
+                for m_no, m_code, m_name in raw_mats:
+                    code_s = str(m_code or "").strip()
+                    name_s = str(m_name or "").strip()
+                    existing_names_codes.add(code_s)
+                    existing_names_codes.add(name_s)
+                    if existing_matrix_no is None and (code_s == name_matrix or name_s == name_matrix):
+                        existing_matrix_no = int(m_no)
+
+                if not overwrite_existing and (name_matrix in existing_names_codes):
+                    suffix = 2
+                    while f"{name_matrix}_{suffix}" in existing_names_codes:
+                        suffix += 1
+                    target_matrix_name = f"{name_matrix}_{suffix}"
+                    existing_matrix_no = None
+
+            # get output directory (always processed/visum/mtx when inside a Visum project, never ver/mtx)
+            path_mat = self._resolve_visum_output_dir(69, "mtx")
             path_mat.mkdir(parents=True, exist_ok=True)
-            path_mat_file = path_mat / f"{name_matrix}.mtx"
+            path_mat_file = path_mat / f"{target_matrix_name}.mtx"
 
             # Create the matrix in Visum, if necessary
 
-            # Check whether mtx file must be written (if matrix is too large)
-            if (self.visum is None) or (self.visum.Net.Zones.Count > 1500):
-                df_mat = pd.DataFrame(matrix_cfl,
-                                      columns=self.zones["No"].values.astype(int),
-                                      index=self.zones["No"].values.astype(int)
-                                      , dtype=int
-                                      ).stack().reset_index()
+            # Save matrix to .mtx file in O-Format
+            df_mat = pd.DataFrame(matrix_cfl,
+                                  columns=self.zones["No"].values.astype(int),
+                                  index=self.zones["No"].values.astype(int),
+                                  dtype=int
+                                  ).stack().reset_index()
 
-                df_mat.columns = ['origin', 'destination', 'value']
+            df_mat.columns = ['origin', 'destination', 'value']
 
-                # Das O-Format kommt ohne 0 Werte aus, bereite einen entsprechenden DataFrame vor
-                df_mat_light = df_mat.loc[df_mat['value'] != 0]
+            # Das O-Format kommt ohne 0 Werte aus, bereite einen entsprechenden DataFrame vor
+            df_mat_light = df_mat.loc[df_mat['value'] != 0]
 
-                with open(path_mat_file, "w", newline='\n') as f:
-                    str_header = '''$O
+            with open(path_mat_file, "w", newline='\n') as f:
+                str_header = '''$O
 * Universität Stuttgart
 *
 * Verbindungsfunktionsstufe 5
@@ -691,44 +747,31 @@ class DirectLineNetworkCalculator:
 * VonBezirk NachBezirk Matrixwert
 '''
 
-                    f.write(str_header)
-                    df_mat_light.to_csv(f, header=False, sep=" ", index=False)
-                    logging.info(f'Matrix {name_matrix} is saved to this file: {path_mat_file}')
+                f.write(str_header)
+                df_mat_light.to_csv(f, header=False, sep=" ", index=False)
+                logging.info(f'Matrix {name_matrix} saved to file: {path_mat_file}')
 
             # If an instance exists, import content into Visum
             if self.visum is not None:
-
-                # chack if matrix has to be created
-                if self.visum.Net.Matrices.Count < 1:
-                    # create matrix
-                    matrix_instance = self.visum.Net.AddMatrix(-1, 2, 3)
-                    matrix_instance.SetAttValue("CODE", name_matrix)
-                    matrix_instance.SetAttValue("NAME", name_matrix)
+                if existing_matrix_no is not None:
+                    matrix_instance = self.visum.Net.Matrices.ItemByKey(existing_matrix_no)
+                    matrix_instance.SetAttValue("CODE", target_matrix_name)
+                    matrix_instance.SetAttValue("NAME", target_matrix_name)
+                    logging.info(f"Matrix '{target_matrix_name}' (No {existing_matrix_no}) exists, content will be overwritten.")
                 else:
-                    # search existing matrix with same name
-                    matrix_instances = self.visum.Net.Matrices.ItemsByRef(f'''Matrix([CODE]= "{name_matrix}") ''')
-                    if matrix_instances.Count < 1:
-                        del matrix_instances
-                        # create matrix
-                        matrix_instance = self.visum.Net.AddMatrix(-1, 2, 3)
-                        matrix_instance.SetAttValue("CODE", name_matrix)
-                        matrix_instance.SetAttValue("NAME", name_matrix)
-                    elif matrix_instances.Count > 1:
-                        logging.warning("Matrix code exists multiple times, the first matrix will be overwritten.")
-                        matrix_instance = matrix_instances.Iterator.Item
-                    else:
-                        matrix_instance = matrix_instances.Iterator.Item
-                        logging.info("Matrix code exists, content will be overwritten.")
+                    matrix_instance = self.visum.Net.AddMatrix(-1, 2, 3)
+                    matrix_instance.SetAttValue("CODE", target_matrix_name)
+                    matrix_instance.SetAttValue("NAME", target_matrix_name)
 
                 # set values
                 # If there are fewer than 1500 zones, you can work with SetValues without any problems.
                 # Otherwise an mtx file must be written
                 if self.visum.Net.Zones.Count < 1500:
                     matrix_instance.SetValues(matrix_cfl)
-                    logging.info(f'{name_matrix}: was read into Visum.')
+                    logging.info(f'{target_matrix_name}: was read into Visum.')
                 else:
-                    matrix_instance.Open(path_mat_file, ReadAdditive=False)
-                    logging.info(f'{name_matrix}: was read into Visum.')
+                    matrix_instance.Open(str(path_mat_file), ReadAdditive=False)
+                    logging.info(f'{target_matrix_name}: was read into Visum.')
 
             else:
                 logging.info(f'Visum is not running. Matrices were exported as files to: {path_mat}')
@@ -802,14 +845,8 @@ class DirectLineNetworkCalculator:
     # @param create_connectors: if True, connectors are created for each CFL. Default: False
     # @return: None
     def export_net(self, links_additive=True, list_cfl=None, create_connectors=True):
-        if self.path_output is None:
-            # if no file path is passed: Use visum file path if instance exists, otherwise use the current path
-            if self.visum is not None:
-                path_net = Path(self.visum.GetPath(1))
-            else:
-                path_net = Path.cwd()
-        else:
-            path_net = self.path_output
+        path_net = self._resolve_visum_output_dir(1, "net")
+        path_net.mkdir(parents=True, exist_ok=True)
 
         if list_cfl is None:
             list_cfl = self.cfl.keys()
@@ -892,7 +929,7 @@ $VERSION:VERSNR;FILETYPE;LANGUAGE;UNIT
             if links_additive is not True:
                 self.visum.Net.Links.RemoveAll(OnlyActive=True)
 
-            self.visum.IO.LoadNet(path_net, ReadAdditive=True)
+            self.visum.IO.LoadNet(str(path_net), ReadAdditive=True)
 
             if self.visum.Net.Links.Count < len(df_edges):
                 logging.warning("Error importing the network file.")
@@ -983,6 +1020,6 @@ $VERSION:VERSNR;FILETYPE;LANGUAGE;UNIT
         for key in self.cfl:
             if '_' in key:
                 parts = key.split('_')
-                self.cfl_labels[key] = f"{self.translator.translate(parts[0])} {'_'.join(parts[1:])}"
+                self.cfl_labels[key] = f"{self.translator.translate(parts[0])}_{'_'.join(parts[1:])}"
             else:
                 self.cfl_labels[key] = key

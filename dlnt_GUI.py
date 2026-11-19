@@ -31,14 +31,462 @@
 # Not all methods of the calculator class are available in the GUI.
 
 
-import wx
-import wx.html2
-import cfl_directlinenetwork_tool as dlnt
+import importlib
+import sys
 from pathlib import Path
+
+
+def _resolve_pando_visum_dirs() -> tuple[Path | None, Path | None]:
+    """Locate PANDO's core/scripts/visum/{scripts,helper_files} from either core or a project's processed/visum/script."""
+    here = Path(__file__).resolve().parent
+    # Case 1: running directly inside core/scripts/visum/scripts
+    if (here / "05_cfl_directlinenetwork_tool.py").is_file():
+        return here, here.parent / "helper_files"
+    # Case 2: running from <PANDO_ROOT>/projects/<project>/processed/visum/script
+    for ancestor in here.parents:
+        cand_scripts = ancestor / "core" / "scripts" / "visum" / "scripts"
+        if (cand_scripts / "05_cfl_directlinenetwork_tool.py").is_file():
+            return cand_scripts, ancestor / "core" / "scripts" / "visum" / "helper_files"
+    return None, None
+
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PANDO_SCRIPTS_DIR, _PANDO_HELPER_DIR = _resolve_pando_visum_dirs()
+for _p in (_SCRIPT_DIR, _PANDO_SCRIPTS_DIR, _PANDO_HELPER_DIR):
+    if _p is not None and _p.is_dir() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+import wx
+import wx.grid
+import wx.html2
 import logging
 import json
 import os
-from language_management import Translator
+import warnings
+
+try:
+    dlnt = importlib.import_module("05_cfl_directlinenetwork_tool")
+except ImportError:
+    import cfl_directlinenetwork_tool as dlnt
+
+try:
+    Translator = importlib.import_module("05_language_management").Translator
+except ImportError:
+    from language_management import Translator
+
+
+def _configure_file_logging(visum=None) -> Path:
+    """Route all logging strictly to processed/visum/log/dlnt_GUI.log.
+
+    Removing StreamHandlers prevents Visum's embedded Python from intercepting
+    sys.stderr writes as modal Warning popups or deadlocking the wx UI loop.
+    """
+    log_name = Path(__file__).name.replace(".py", ".log")
+    script_parent = Path(__file__).resolve().parent
+    log_dir = script_parent.parent / "log"
+    if script_parent.name.lower() != "script" and visum is not None:
+        try:
+            doc_name = str(visum.UserPreferences.DocumentName or "").strip()
+            if doc_name:
+                doc_parent = Path(doc_name).resolve().parent
+                visum_root = doc_parent.parent if doc_parent.name.lower() == "ver" else doc_parent
+                log_dir = visum_root / "log"
+        except Exception:
+            pass
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path_logfile = log_dir / log_name
+    except OSError:
+        path_logfile = Path(log_name)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for existing_h in root_logger.handlers[:]:
+        root_logger.removeHandler(existing_h)
+        try:
+            existing_h.close()
+        except Exception:
+            pass
+
+    logger_format = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%d.%m.%Y %I:%M:%S %p")
+    file_handler = logging.FileHandler(path_logfile, mode="w", encoding="utf-8")
+    file_handler.setFormatter(logger_format)
+    root_logger.addHandler(file_handler)
+
+    # Redirect Python warnings (e.g. pandas FutureWarning during export_net) away from
+    # Visum's sys.stderr modal Warning popup interceptor directly into dlnt_GUI.log.
+    def _log_warning(message, category, filename, lineno, file=None, line=None):
+        logging.warning("%s:%s: %s: %s", filename, lineno, category.__name__, message)
+
+    warnings.showwarning = _log_warning
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    return path_logfile
+
+
+# ---------------------------------------------------------------------------
+# PANDO Design System Palette & Custom Widgets (matches core/app/app_qt/main_window.py)
+# ---------------------------------------------------------------------------
+_PANDO_BG          = wx.Colour(248, 250, 252)  # #f8fafc
+_PANDO_CARD        = wx.Colour(255, 255, 255)  # #ffffff
+_PANDO_BORDER      = wx.Colour(203, 213, 225)  # #cbd5e1
+_PANDO_BORDER_SOFT = wx.Colour(226, 232, 240)  # #e2e8f0
+_PANDO_TEXT        = wx.Colour(15, 23, 42)     # #0f172a
+_PANDO_BODY        = wx.Colour(51, 65, 85)     # #334155
+_PANDO_MUTED       = wx.Colour(100, 116, 139)  # #64748b
+_PANDO_BLUE        = wx.Colour(37, 99, 235)    # #2563eb
+_PANDO_BLUE_HOVER  = wx.Colour(29, 78, 216)    # #1d4ed8
+_PANDO_GREEN       = wx.Colour(16, 185, 129)   # #10b981
+_PANDO_GREEN_HOVER = wx.Colour(5, 150, 105)    # #059669
+_PANDO_HOVER_BG    = wx.Colour(241, 245, 249)  # #f1f5f9
+_PANDO_DANGER      = wx.Colour(185, 28, 28)    # #b91c1c
+_PANDO_DANGER_BDR  = wx.Colour(254, 202, 202)  # #fecaca
+_PANDO_DANGER_HOV  = wx.Colour(254, 242, 242)  # #fef2f2
+_PANDO_DISABLED_BG = wx.Colour(248, 250, 252)  # #f8fafc
+_PANDO_DISABLED_FG = wx.Colour(148, 163, 184)  # #94a3b8
+
+
+class _PandoButton(wx.Panel):
+    """Flat, rounded PANDO-style button with hover/disabled states (drop-in for wx.Button)."""
+
+    def __init__(self, parent, label: str = "", *, variant: str = "secondary", height: int = 38):
+        super().__init__(parent, style=wx.NO_BORDER)
+        self._label = label
+        self._variant = variant
+        self._hover = False
+        self._pressed = False
+        self._enabled = True
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.SetMinSize((-1, height))
+        self.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_ENTER_WINDOW, self._on_enter)
+        self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
+        self.Bind(wx.EVT_LEFT_DOWN, self._on_down)
+        self.Bind(wx.EVT_LEFT_UP, self._on_up)
+
+    def SetLabel(self, label: str):
+        self._label = str(label)
+        self.Refresh()
+
+    def GetLabel(self) -> str:
+        return self._label
+
+    def Enable(self, enable: bool = True):
+        self._enabled = bool(enable)
+        self.SetCursor(wx.Cursor(wx.CURSOR_HAND if self._enabled else wx.CURSOR_ARROW))
+        super().Enable(self._enabled)
+        self.Refresh()
+        return True
+
+    def _palette(self):
+        if not self._enabled:
+            return _PANDO_DISABLED_BG, _PANDO_BORDER_SOFT, _PANDO_DISABLED_FG, False
+        if self._variant == "green":
+            bg = _PANDO_GREEN_HOVER if (self._hover or self._pressed) else _PANDO_GREEN
+            return bg, _PANDO_GREEN_HOVER, _PANDO_CARD, True
+        if self._variant == "blue":
+            bg = _PANDO_BLUE_HOVER if (self._hover or self._pressed) else _PANDO_BLUE
+            return bg, _PANDO_BLUE_HOVER, _PANDO_CARD, True
+        if self._variant == "danger":
+            bg = _PANDO_DANGER_HOV if (self._hover or self._pressed) else _PANDO_CARD
+            return bg, _PANDO_DANGER_BDR, _PANDO_DANGER, False
+        bg = _PANDO_HOVER_BG if (self._hover or self._pressed) else _PANDO_CARD
+        return bg, _PANDO_BORDER, _PANDO_BODY, False
+
+    def _on_enter(self, _evt):
+        if self._enabled:
+            self._hover = True
+            self.Refresh()
+
+    def _on_leave(self, _evt):
+        self._hover = False
+        self._pressed = False
+        self.Refresh()
+
+    def _on_down(self, _evt):
+        if self._enabled:
+            self._pressed = True
+            self.Refresh()
+
+    def _on_up(self, _evt):
+        if self._enabled and self._pressed:
+            self._pressed = False
+            self.Refresh()
+            evt = wx.CommandEvent(wx.wxEVT_BUTTON, self.GetId())
+            evt.SetEventObject(self)
+            self.GetEventHandler().ProcessEvent(evt)
+
+    def _on_paint(self, _evt):
+        dc = wx.AutoBufferedPaintDC(self)
+        try:
+            w, h = self.GetClientSize()
+            dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
+            dc.Clear()
+
+            bg, border, fg, is_bold = self._palette()
+            dc.SetBrush(wx.Brush(bg))
+            dc.SetPen(wx.Pen(border, 1))
+            dc.DrawRoundedRectangle(0, 0, max(1, w), max(1, h), 6)
+
+            font = self.GetFont()
+            font.SetPointSize(9)
+            if is_bold:
+                font.SetWeight(wx.FONTWEIGHT_BOLD)
+            dc.SetFont(font)
+            dc.SetTextForeground(fg)
+            tw, th = dc.GetTextExtent(self._label)
+            dc.DrawText(self._label, int((w - tw) / 2), int((h - th) / 2))
+        except Exception:
+            pass
+
+
+class _PandoProgressBar(wx.Panel):
+    """Slim full-width PANDO progress bar (#e2e8f0 track, #2563eb fill)."""
+
+    def __init__(self, parent, height: int = 6):
+        super().__init__(parent, style=wx.NO_BORDER)
+        self._value = 0
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.SetMinSize((-1, height))
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+
+    def SetValue(self, pct: int):
+        self._value = max(0, min(100, int(pct)))
+        self.Refresh()
+
+    def _on_paint(self, _evt):
+        dc = wx.AutoBufferedPaintDC(self)
+        w, h = self.GetClientSize()
+        dc.SetBackground(wx.Brush(_PANDO_BORDER_SOFT))
+        dc.Clear()
+        if self._value > 0:
+            fill_w = int(round(w * (self._value / 100.0)))
+            dc.SetPen(wx.TRANSPARENT_PEN)
+            dc.SetBrush(wx.Brush(_PANDO_BLUE))
+            dc.DrawRectangle(0, 0, fill_w, h)
+
+
+class _PandoSegmentedToggle(wx.Panel):
+    """Modern PANDO segmented pill toggle (e.g. EN | DE) for instant language switching."""
+
+    def __init__(self, parent, options: list[tuple[str, str]], selected_key: str, on_change, height: int = 34):
+        super().__init__(parent, style=wx.NO_BORDER)
+        self._options = list(options)
+        self._selected = selected_key
+        self._hover_idx = -1
+        self._on_change = on_change
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.SetMinSize((190, height))
+        self.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_LEFT_DOWN, self._on_click)
+        self.Bind(wx.EVT_MOTION, self._on_motion)
+        self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
+
+    def set_selected(self, key: str):
+        if key != self._selected:
+            self._selected = key
+            self.Refresh()
+
+    def _hit_index(self, x: int) -> int:
+        w = max(1, self.GetClientSize().width)
+        n = max(1, len(self._options))
+        idx = int(x * n // w)
+        return max(0, min(n - 1, idx))
+
+    def _on_motion(self, evt):
+        idx = self._hit_index(evt.GetX())
+        if idx != self._hover_idx:
+            self._hover_idx = idx
+            self.Refresh()
+
+    def _on_leave(self, _evt):
+        if self._hover_idx != -1:
+            self._hover_idx = -1
+            self.Refresh()
+
+    def _on_click(self, evt):
+        try:
+            idx = self._hit_index(evt.GetX())
+            key = self._options[idx][0]
+            if key != self._selected:
+                self._selected = key
+                self.Refresh()
+                if self._on_change is not None:
+                    self._on_change(key)
+        except Exception:
+            logging.exception("Error handling segmented toggle click")
+
+    def _on_paint(self, _evt):
+        try:
+            dc = wx.AutoBufferedPaintDC(self)
+            w, h = self.GetClientSize()
+            dc.SetBackground(wx.Brush(_PANDO_CARD))
+            dc.Clear()
+
+            # Outer pill track
+            dc.SetPen(wx.Pen(_PANDO_BORDER, 1))
+            dc.SetBrush(wx.Brush(_PANDO_BG))
+            dc.DrawRoundedRectangle(0, 0, w, h, 8)
+
+            n = max(1, len(self._options))
+            pad = 3
+            seg_w = (w - 2 * pad) / float(n)
+            font_active = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+            font_normal = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+
+            for i, (key, label) in enumerate(self._options):
+                sx = int(round(pad + i * seg_w))
+                sw = int(round(pad + (i + 1) * seg_w)) - sx
+                is_sel = (key == self._selected)
+                if is_sel:
+                    dc.SetPen(wx.TRANSPARENT_PEN)
+                    dc.SetBrush(wx.Brush(_PANDO_BLUE))
+                    dc.DrawRoundedRectangle(sx, pad, sw, h - 2 * pad, 6)
+                    dc.SetFont(font_active)
+                    dc.SetTextForeground(wx.Colour(255, 255, 255))
+                else:
+                    if i == self._hover_idx:
+                        dc.SetPen(wx.TRANSPARENT_PEN)
+                        dc.SetBrush(wx.Brush(wx.Colour(226, 232, 240)))
+                        dc.DrawRoundedRectangle(sx, pad, sw, h - 2 * pad, 6)
+                    dc.SetFont(font_normal)
+                    dc.SetTextForeground(_PANDO_BODY)
+                tw, th = dc.GetTextExtent(label)
+                dc.DrawText(label, sx + (sw - tw) // 2, (h - th) // 2)
+        except Exception:
+            logging.exception("Error painting segmented toggle")
+
+
+def _make_pando_card(parent, title: str):
+    """Create a PANDO-styled white card with a crisp 1px border and bold header."""
+    border_wrap = wx.Panel(parent)
+    border_wrap.SetBackgroundColour(_PANDO_BORDER_SOFT)
+    wrap_sizer = wx.BoxSizer(wx.VERTICAL)
+
+    card = wx.Panel(border_wrap)
+    card.SetBackgroundColour(_PANDO_CARD)
+    card_sizer = wx.BoxSizer(wx.VERTICAL)
+
+    title_lbl = wx.StaticText(card, -1, title)
+    t_font = title_lbl.GetFont()
+    t_font.SetPointSize(10)
+    t_font.SetWeight(wx.FONTWEIGHT_BOLD)
+    title_lbl.SetFont(t_font)
+    title_lbl.SetForegroundColour(_PANDO_TEXT)
+    card_sizer.Add(title_lbl, 0, wx.LEFT | wx.RIGHT | wx.TOP, 14)
+
+    divider = wx.Panel(card, size=(-1, 1), style=wx.NO_BORDER)
+    divider.SetMinSize((-1, 1))
+    divider.SetMaxSize((-1, 1))
+    divider.SetBackgroundColour(_PANDO_BORDER_SOFT)
+    card_sizer.Add(divider, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
+
+    content_sizer = wx.BoxSizer(wx.VERTICAL)
+    card_sizer.Add(content_sizer, 1, wx.EXPAND | wx.ALL, 14)
+    card.SetSizer(card_sizer)
+
+    wrap_sizer.Add(card, 1, wx.EXPAND | wx.ALL, 1)
+    border_wrap.SetSizer(wrap_sizer)
+    return border_wrap, card, title_lbl, content_sizer
+
+
+class _GridBoolProxy:
+    """Thin adapter exposing a CheckBox-like API backed by column 0 of a wx.grid.Grid."""
+
+    def __init__(self, grid: wx.grid.Grid, row: int, label: str):
+        self._grid = grid
+        self._row = row
+        self.Label = label
+
+    def IsChecked(self) -> bool:
+        return self._grid.GetCellValue(self._row, 0) == "1"
+
+    @property
+    def Value(self) -> int:
+        return 1 if self.IsChecked() else 0
+
+    def SetValue(self, val: bool):
+        self._grid.SetCellValue(self._row, 0, "1" if val else "")
+
+    def SetLabel(self, label: str):
+        self.Label = label
+
+
+class _GridIntProxy:
+    """Thin adapter exposing a SpinCtrl-like API backed by a numeric column of a wx.grid.Grid."""
+
+    def __init__(self, grid: wx.grid.Grid, row: int, col: int):
+        self._grid = grid
+        self._row = row
+        self._col = col
+        self._min = 0
+        self._max = 999999
+
+    @property
+    def Value(self) -> int:
+        try:
+            return int(float(self._grid.GetCellValue(self._row, self._col) or 0))
+        except (ValueError, TypeError):
+            return 0
+
+    def GetValue(self) -> int:
+        return self.Value
+
+    def SetValue(self, val: int):
+        clamped = max(self._min, min(self._max, int(val)))
+        self._grid.SetCellValue(self._row, self._col, str(clamped))
+
+    def SetRange(self, min_val: int, max_val: int):
+        self._min = int(min_val)
+        self._max = max(int(min_val), int(max_val))
+
+    def Enable(self, enable: bool = True):
+        self._grid.SetReadOnly(self._row, self._col, not bool(enable))
+        self._grid.SetCellBackgroundColour(
+            self._row, self._col, _PANDO_CARD if enable else _PANDO_DISABLED_BG
+        )
+        self._grid.SetCellTextColour(
+            self._row, self._col, _PANDO_TEXT if enable else _PANDO_DISABLED_FG
+        )
+
+
+class _CenteredBoolRenderer(wx.grid.GridCellRenderer):
+    """Draws a crisp, pixel-perfect centered PANDO checkbox inside column 0."""
+
+    def Draw(self, grid, attr, dc, rect, row, col, isSelected):
+        try:
+            bg = grid.GetSelectionBackground() if isSelected else attr.GetBackgroundColour()
+            dc.SetPen(wx.TRANSPARENT_PEN)
+            dc.SetBrush(wx.Brush(bg))
+            dc.DrawRectangle(rect)
+
+            checked = grid.GetCellValue(row, col) == "1"
+            box = 15
+            bx = rect.x + (rect.width - box) // 2
+            by = rect.y + (rect.height - box) // 2
+
+            if checked:
+                dc.SetPen(wx.Pen(_PANDO_BLUE, 1))
+                dc.SetBrush(wx.Brush(_PANDO_BLUE))
+                dc.DrawRoundedRectangle(bx, by, box, box, 3)
+                dc.SetPen(wx.Pen(wx.Colour(255, 255, 255), 2))
+                dc.DrawLine(bx + 3, by + 8, bx + 6, by + 11)
+                dc.DrawLine(bx + 6, by + 11, bx + 12, by + 4)
+            else:
+                dc.SetPen(wx.Pen(_PANDO_BORDER, 1))
+                dc.SetBrush(wx.Brush(_PANDO_CARD))
+                dc.DrawRoundedRectangle(bx, by, box, box, 3)
+        except Exception:
+            logging.exception("Error drawing centered checkbox cell")
+
+    def GetBestSize(self, grid, attr, dc, row, col):
+        return wx.Size(24, 24)
+
+    def Clone(self):
+        return _CenteredBoolRenderer()
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +514,7 @@ def _load_rin_config(visum=None):
     -------
     list of dict  – five entries, each {"n": int, "v": int}.
     """
-    _defaults = [{"n": 2, "v": 1}] * 5
+    _defaults = [{"n": 2, "v": 0}] * 5
     try:
         if visum is not None:
             ver_path = visum.GetPath(1)
@@ -160,11 +608,10 @@ class DirectLineNetworkToolFrame(wx.Frame):
                 Visum = com.Dispatch(f"Visum.Visum.{version}")
                 logging.info('open visum file: {}'.format(source))
                 Visum.LoadVersion(source)
-                wx.SafeYield()  # let the splash timer fire after the heavy COM load
 
         self.visum = Visum
+        _configure_file_logging(self.visum)
         self.list_attr = get_attr_zones(self.visum)
-        wx.SafeYield()  # let the splash timer fire after zone-attribute fetch
 
         # ── Read shared config (written by RIN_Matrizen.py) ──────────────
         # _rin_cfl_params is a list of five {"n", "v"} dicts, one per CFL tier.
@@ -172,14 +619,13 @@ class DirectLineNetworkToolFrame(wx.Frame):
         # the user sees the values they entered in the earlier workflow step.
         # cfl_5 has no matching RIN tier – it keeps the previous default (0).
         # The user can still override any value in the GUI at any time.
-        _rin_cfl_params = _load_rin_config(self.visum)
         self._default_no_supplier_per_cfl = {
-            "cfl_0": _rin_cfl_params[0]["v"],
-            "cfl_1": _rin_cfl_params[1]["v"],
-            "cfl_2": _rin_cfl_params[2]["v"],
-            "cfl_3": _rin_cfl_params[3]["v"],
-            "cfl_4": _rin_cfl_params[4]["v"],
-            "cfl_5": self.default_no_supplier,   # no RIN tier – keep existing default
+            "cfl_0": 0,
+            "cfl_1": 0,
+            "cfl_2": 0,
+            "cfl_3": 0,
+            "cfl_4": 0,
+            "cfl_5": 0,
         }
         logging.info("dlnt_GUI: per-CFL default suppliers: {}".format(
             self._default_no_supplier_per_cfl))
@@ -195,82 +641,81 @@ class DirectLineNetworkToolFrame(wx.Frame):
 
         self.Show()
 
-        # Re-apply size and force a full layout pass AFTER Show().
-        # When the script is launched from inside Visum, the process already
-        # has a DPI-awareness context set by Visum before wx starts.  That
-        # causes the SetSize call in __set_properties__ (which runs before
-        # Show) to be silently overridden when the sizer first lays out the
-        # window.  Reapplying size + Layout + SendSizeEvent here, after Show,
-        # ensures the sizer recalculates at the correct pixel dimensions in
-        # every launch context.
-        self.SetSize((1250, 550))
+        # Fit to best size so Export to Visum & Tools are 100% visible on open without resizing
+        self.panel.Layout()
+        best = self.panel.GetBestSize()
+        min_w = max(1320, best.width + 36)
+        min_h = max(620, best.height + 64)
+        self.SetMinSize((min_w, min_h))
+        self.SetSize((min_w, min_h))
+        self.CentreOnScreen()
         self.Layout()
         self.SendSizeEvent()
 
         self.Raise()
         self.SetFocus()
 
-        # Auto-import data on startup
-        self.event_import_data(None)
+        # Auto-import data once the wx MainLoop is active
+        wx.CallAfter(self.event_import_data, None)
 
     ## Sets the properties of the main window.
     #  Configures window title, size, and initializes default values.
     def __set_properties__(self):
-        self.SetTitle(self.translator.translate('app_title')) # Use self.translator
-        # Use FromDIP so that pixel values are interpreted correctly regardless
-        # of the DPI context inherited from Visum (or any other host process).
-        self.SetMinSize(self.FromDIP(wx.Size(1200, 550)))
-        self.SetSize(self.FromDIP(wx.Size(1250, 550)))
-
+        self.SetTitle(self.translator.translate('app_title'))
         self.__set_values_cfl_buttons__()
-
         self.event_set_default()
 
     ## Sets up the layout of the main window.
-    #  Creates and arranges all UI components including panels, notebook, menu bar, and status bar.
+    #  Creates and arranges all UI components in PANDO style with full-width progress bar.
     def __set_layout__(self):
-        # Layout
-        # Menu bar/Toolbar at the top
-        # then
-
-        # create a panel (between menubar and statusbar) ...
+        self.SetBackgroundColour(_PANDO_BG)
         self.panel = wx.Panel(self)
-        self.notebook = wx.Notebook(self.panel)
+        self.panel.SetBackgroundColour(_PANDO_BG)
 
-        # create tabs
-        self.tabMain = MainTab(self.notebook, self.translator)
-        self.tabLog = LogTab(self.notebook)
+        root_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self.notebook.AddPage(self.tabMain, self.translator.translate('tab_main'))
-        self.notebook.AddPage(self.tabLog, self.translator.translate('tab_log'))
+        # ---- Main content (directly inside panel, no redundant header or Notebook tab) ----
+        self.notebook = None
+        self.tabMain = MainTab(self.panel, self.translator)
 
-        # create a status bar at the bottom of the frame
-        self.CreateStatusBar()
+        # ---- Right PANDO action card ----
+        side_wrap, self.side_panel, self._lbl_side_title, side_sizer = _make_pando_card(
+            self.panel, "Tools"
+        )
+        _lang_opts = [("en", "English"), ("de", "Deutsch")]
+        self.lang_toggle = _PandoSegmentedToggle(
+            self.side_panel,
+            _lang_opts,
+            selected_key=self.translator.get_selected_language(),
+            on_change=self.set_language,
+            height=34,
+        )
+        side_sizer.Add(self.lang_toggle, 0, wx.EXPAND | wx.BOTTOM, 12)
 
-        # ---- Side panel with action buttons ----
-        self.side_panel = wx.Panel(self.panel)
-        side_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.btn_side_reset = _PandoButton(self.side_panel, self.translator.translate('menu_reset_calculations'), height=36)
+        self.btn_side_defaults = _PandoButton(self.side_panel, self.translator.translate('menu_set_defaults'), height=36)
+        self.btn_side_info = _PandoButton(self.side_panel, self.translator.translate('menu_info'), height=36)
+        self.btn_side_filter = _PandoButton(self.side_panel, self.translator.translate('toolbar_filter_inserted_links'), height=36)
+        self.btn_side_delete = _PandoButton(self.side_panel, self.translator.translate('toolbar_delete_inserted_links'), variant="danger", height=36)
 
-        self.btn_side_language = wx.Button(self.side_panel, label=self.translator.translate('language_choice_title'))
-        self.btn_side_reset = wx.Button(self.side_panel, label=self.translator.translate('menu_reset_calculations'))
-        self.btn_side_defaults = wx.Button(self.side_panel, label=self.translator.translate('menu_set_defaults'))
-        self.btn_side_info = wx.Button(self.side_panel, label=self.translator.translate('menu_info'))
-        self.btn_side_filter = wx.Button(self.side_panel, label=self.translator.translate('toolbar_filter_inserted_links'))
-        self.btn_side_delete = wx.Button(self.side_panel, label=self.translator.translate('toolbar_delete_inserted_links'))
-
-        for btn in (self.btn_side_language, self.btn_side_reset,
+        for btn in (self.btn_side_reset,
                     self.btn_side_defaults, self.btn_side_info, self.btn_side_filter, self.btn_side_delete):
-            btn.SetMinSize((180, 40))
-            side_sizer.Add(btn, 0, wx.EXPAND | wx.ALL, 5)
+            btn.SetMinSize((190, 36))
+            side_sizer.Add(btn, 0, wx.EXPAND | wx.BOTTOM, 8)
 
         side_sizer.AddStretchSpacer()
-        self.side_panel.SetSizer(side_sizer)
 
-        # Set notebook + side panel in a horizontal sizer
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sizer.Add(self.notebook, 1, wx.EXPAND)
-        sizer.Add(self.side_panel, 0, wx.EXPAND | wx.ALL, 5)
-        self.panel.SetSizer(sizer)
+        body_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        body_sizer.Add(self.tabMain, 1, wx.EXPAND | wx.ALL, 12)
+        body_sizer.Add(side_wrap, 0, wx.EXPAND | wx.TOP | wx.RIGHT | wx.BOTTOM, 12)
+        root_sizer.Add(body_sizer, 1, wx.EXPAND)
+
+        # ---- Full-width slim PANDO progress bar across the entire window ----
+        self.progress_bar = _PandoProgressBar(self.panel, height=5)
+        root_sizer.Add(self.progress_bar, 0, wx.EXPAND)
+
+        self.panel.SetSizer(root_sizer)
+        self.CreateStatusBar()
 
 
     ## Binds event handlers to UI elements.
@@ -281,7 +726,6 @@ class DirectLineNetworkToolFrame(wx.Frame):
         self.Bind(wx.EVT_CLOSE, self.event_quit_button)
 
         # Side panel buttons
-        self.btn_side_language.Bind(wx.EVT_BUTTON, self.on_choose_language)
         self.btn_side_reset.Bind(wx.EVT_BUTTON, self.event_reset)
         self.btn_side_defaults.Bind(wx.EVT_BUTTON, self.event_set_default)
         self.btn_side_info.Bind(wx.EVT_BUTTON, self.event_info)
@@ -292,46 +736,20 @@ class DirectLineNetworkToolFrame(wx.Frame):
     ## Sets the values and ranges for the CFL buttons.
     #  Configures the range and initial values for the CFL value buttons based on the maximum value of the selected attribute.
     def __set_values_cfl_buttons__(self):
-        max_value_cfl = int(self.visum.Net.AttValue(f"Max:Zones\{self.attr_cfl}"))
+        max_value_cfl = int(self.visum.Net.AttValue(f"Max:Zones\\{self.attr_cfl}"))
         idx = 0
         for btn in self.buttons_cfl_value.values():
             btn.SetRange(0, max_value_cfl)
             btn.SetValue(idx)
             idx += 1
 
-    ## Event handler for language selection.
-    #  Opens a dialog for the user to select a language, updates the translator with the selected language,
-    #  and refreshes the GUI text to reflect the new language.
-    #  @param event The event object.
-    def on_choose_language(self, event):
-
-        languages = sorted(list(self.translator.translations.keys()))
-
-        current_language = self.translator.get_selected_language()
-        current_selection_index = languages.index(current_language) if current_language in languages else 0
-
-        # Create the wx.SingleChoiceDialogue
-        dlg = wx.SingleChoiceDialog(
-            self,
-            self.translator.translate('language_choice_title'),
-            self.translator.translate('language_choice'),
-            choices=languages,
-        )
-        dlg.SetSelection(current_selection_index)
-
-        if dlg.ShowModal() == wx.ID_OK:
-            selected_language = languages[dlg.GetSelection()]
-
-            if selected_language != self.translator.get_selected_language():
-                # Change the language in the translator
-                self.translator.update_selected_language(selected_language)
-                # Update the GUI texts (Step 3)
-                self.refresh_gui_text()
-
-                if self.dln_calculator is not None:
-                    self.dln_calculator.update_label_cfl()
-
-        dlg.Destroy()  # Important: Destroy the dialog after it has been closed.
+    ## Switches the UI language immediately without a popup dialog.
+    def set_language(self, selected_language: str):
+        if selected_language != self.translator.get_selected_language():
+            self.translator.update_selected_language(selected_language)
+            self.refresh_gui_text()
+            if self.dln_calculator is not None:
+                self.dln_calculator.update_label_cfl()
 
     ## Event handler for setting default values.
     #  Resets all input fields to their default values, including neighbor counts,
@@ -355,9 +773,8 @@ class DirectLineNetworkToolFrame(wx.Frame):
             self.buttons_value_n_supplier[key].SetValue(v)
 
         self.cb_cfl.SetValue("TypeNo")
-        self.cb_origin.SetValue("None")
-        self.cb_destination.SetValue("None")
-        self.cb_dist_fcn.SetValue("euclidean")
+        self.cb_origin.SetSelection(0)
+        self.cb_destination.SetSelection(0)
 
         self.SetStatusText(self.translator.translate('status_set_defaults'))
 
@@ -392,7 +809,7 @@ class DirectLineNetworkToolFrame(wx.Frame):
         if self.visum is not None:
             # Initialize Calculator instance
             self.dln_calculator = dlnt.DirectLineNetworkCalculator(self.visum, attr_cfl=self.attr_cfl, max_distance=1,
-                                                                   no_suppliers=1, attr_orig=self.attr_origin,
+                                                                   no_suppliers=0, attr_orig=self.attr_origin,
                                                                    attr_dest=self.attr_destination,
                                                                    translator=self.translator)
             # Pass current parameters
@@ -405,6 +822,21 @@ class DirectLineNetworkToolFrame(wx.Frame):
     #  Updates the parameters from the UI, performs the main calculation,
     #  and updates the status bar to indicate completion.
     #  @param event The event object.
+    def set_progress(self, current: int, total: int, message: str = ""):
+        """Update the full-width PANDO progress bar and status bar without re-entering Visum's UI loop."""
+        gauge = getattr(self, "progress_bar", None)
+        if gauge is not None:
+            total = max(1, int(total))
+            pct = max(0, min(100, int(round(100.0 * current / total))))
+            gauge.SetValue(pct)
+            gauge.Update()
+        if message:
+            self.SetStatusText(message)
+        sb = self.GetStatusBar()
+        if sb is not None:
+            sb.Refresh()
+            sb.Update()
+
     def event_calculate(self, event):
 
         if self.dln_calculator is None:
@@ -412,22 +844,40 @@ class DirectLineNetworkToolFrame(wx.Frame):
             wx.MessageBox(self.translator.translate('error_no_calculator_instance'), 'Info', wx.OK | wx.ICON_INFORMATION)
             return
 
-        # Procedure
-        # 1. Update the specified parameters if something has been changed
-        # 2. Calculate
-        self.update_param_cfl()
-        # self.dln_calculator.init_results() # already implemented in calculate function
-        self.dln_calculator.calculate_main()
-
-        # Status bar
-        self.SetStatusText(self.translator.translate('status_calculation_performed'))
+        wx.BeginBusyCursor()
+        try:
+            self.update_param_cfl()
+            self.set_progress(0, 1, "Calculating...")
+            self.dln_calculator.calculate_main(
+                on_progress=lambda cur, tot, label: self.set_progress(
+                    cur, tot, f"Calculating {label} ({cur}/{tot})..." if label else "Calculating..."
+                )
+            )
+            self.set_progress(1, 1, self.translator.translate('status_calculation_performed'))
+        except Exception as exc:
+            logging.exception("Calculation failed: %s", exc)
+            self.set_progress(0, 1, f"Calculation failed: {exc}")
+            wx.MessageBox(f"Calculation failed:\n{exc}", "Error", wx.OK | wx.ICON_ERROR)
+        finally:
+            if wx.IsBusy():
+                wx.EndBusyCursor()
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
 
     ## Event handler for the quit button or window close event.
     #  Destroys the panel and frame, and exits the application's main loop.
     #  @param event The event object.
     def event_quit_button(self, event):
-        # del self.visum
-        # self.stop = True
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
         self.panel.Destroy()
         self.Destroy()
         wx.GetApp().ExitMainLoop()
@@ -437,37 +887,53 @@ class DirectLineNetworkToolFrame(wx.Frame):
     #  updates parameters, and updates the status bar.
     #  @param event The event object.
     def event_import_data(self, event):
-        # works so far,
-
         # Show loading feedback in status bar and busy cursor while data is being imported
         self.SetStatusText(self.translator.translate('status_loading_data') if
                            self.translator.translate('status_loading_data') != 'status_loading_data'
                            else "Loading data, please wait...")
+        self.Refresh()
+        self.Update()
         wx.BeginBusyCursor()
-        wx.GetApp().Yield()  # Force the status bar update to paint immediately
-
-        # Creating a Calculator instance
-        if self.visum is not None:
-            # Init Calculator instance
-            self.dln_calculator = dlnt.DirectLineNetworkCalculator(self.visum, attr_cfl=self.attr_cfl, max_distance=1,
-                                                                   no_suppliers=1, attr_orig=self.attr_origin,
-                                                                   attr_dest=self.attr_destination,
-                                                                   translator=translator)
-            wx.SafeYield()  # let the splash timer fire after the heavy calculator init
-            # Pass current parameters
-            self.update_param_cfl()
-        else:
-            logging.warning("Handling of file type is not implemented")
-        wx.EndBusyCursor()
-        self.SetStatusText(self.translator.translate('status_data_imported'))
+        try:
+            if self.visum is not None:
+                logging.info("Importing zone data from Visum...")
+                self.dln_calculator = dlnt.DirectLineNetworkCalculator(
+                    self.visum,
+                    attr_cfl=self.attr_cfl,
+                    max_distance=1,
+                    no_suppliers=0,
+                    attr_orig=self.attr_origin,
+                    attr_dest=self.attr_destination,
+                    translator=self.translator,
+                )
+                self.update_param_cfl()
+                self.SetStatusText(self.translator.translate('status_data_imported'))
+            else:
+                logging.warning("Handling of file type is not implemented")
+                self.SetStatusText("No Visum connection available.")
+        except Exception as exc:
+            logging.exception("Failed to import data from Visum: %s", exc)
+            self.SetStatusText(f"Import failed: {exc}")
+            wx.MessageBox(f"Data import failed:\n{exc}", "Error", wx.OK | wx.ICON_ERROR)
+        finally:
+            if wx.IsBusy():
+                wx.EndBusyCursor()
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
 
     ## Event handler for the Info button.
     #  @param event The event object.
     def event_info(self, event):
-        path_scripts = Path(__file__).parent # Path(self.visum.GetPath(37))
-        logging.info(path_scripts)
-        # Update this line to instantiate HelpPopUp directly and pass the translator.
-        HelpPopUp(self, self.translator, path_scripts)
+        doc_base = (
+            _PANDO_HELPER_DIR
+            if (_PANDO_HELPER_DIR is not None and (_PANDO_HELPER_DIR / "documentation").is_dir())
+            else Path(__file__).parent
+        )
+        logging.info(doc_base)
+        HelpPopUp(self, self.translator, doc_base)
 
     ## Event handler for resetting calculations.
     #  Initializes the results in the calculator, effectively clearing any previous calculations,
@@ -515,7 +981,8 @@ class DirectLineNetworkToolFrame(wx.Frame):
 
         if self.dln_calculator is not None:
             self.update_param_cfl()
-            self.dln_calculator.export_matrix(list_cfl=[cfl_level])
+            overwrite = bool(self.tabMain.cb_overwrite_matrix.GetValue())
+            self.dln_calculator.export_matrix(list_cfl=[cfl_level], overwrite_existing=overwrite)
 
         self.SetStatusText(f"{cfl_name}: {self.translator.translate('status_matrix_loaded_into_visum')}")
 
@@ -524,14 +991,31 @@ class DirectLineNetworkToolFrame(wx.Frame):
     #  and updates the status bar.
     #  @param event The event object.
     def event_export_master(self, event):
-        if self.dln_calculator is not None:
+        if self.dln_calculator is None:
+            return
+        wx.BeginBusyCursor()
+        try:
             self.update_param_cfl()
-            self.dln_calculator.export_matrix()
+            overwrite = bool(self.tabMain.cb_overwrite_matrix.GetValue())
+            self.set_progress(1, 3, "Exporting matrices...")
+            self.dln_calculator.export_matrix(overwrite_existing=overwrite)
+            self.set_progress(2, 3, "Exporting link network...")
             self.dln_calculator.export_net(links_additive=True)
             self.dln_calculator.delete_unused_nodes()
             self.tabMain.mark_exported()
-
-        self.SetStatusText(self.translator.translate('status_combined_results_imported'))
+            self.set_progress(3, 3, self.translator.translate('status_combined_results_imported'))
+        except Exception as exc:
+            logging.exception("Combined export failed: %s", exc)
+            self.set_progress(0, 1, f"Export failed: {exc}")
+            wx.MessageBox(f"Export failed:\n{exc}", "Error", wx.OK | wx.ICON_ERROR)
+        finally:
+            if wx.IsBusy():
+                wx.EndBusyCursor()
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
 
     ## Event handler for exporting MTX results for all currently checked CFL levels.
     #  Iterates over checked CFL checkboxes and exports the matrix for each selected level.
@@ -544,11 +1028,30 @@ class DirectLineNetworkToolFrame(wx.Frame):
         if not selected:
             wx.MessageBox(self.translator.translate('error_no_calculator_instance'), 'Info', wx.OK | wx.ICON_INFORMATION)
             return
-        self.dln_calculator.export_matrix(list_cfl=selected)
-        names = ", ".join(self.button_cfl_active[c].Label for c in selected)
-        self.SetStatusText(f"{names}: {self.translator.translate('status_matrix_loaded_into_visum')}")
-        # Update status labels
-        self.tabMain.mark_exported(selected)
+        wx.BeginBusyCursor()
+        try:
+            overwrite = bool(self.tabMain.cb_overwrite_matrix.GetValue())
+            total = len(selected)
+            for idx, cfl_level in enumerate(selected, start=1):
+                lbl = self.button_cfl_active[cfl_level].Label
+                self.set_progress(idx - 1, total, f"Exporting matrix {lbl} ({idx}/{total})...")
+                self.dln_calculator.export_matrix(list_cfl=[cfl_level], overwrite_existing=overwrite)
+                self.set_progress(idx, total, f"Exported matrix {lbl} ({idx}/{total})")
+            names = ", ".join(self.button_cfl_active[c].Label for c in selected)
+            self.set_progress(total, total, f"{names}: {self.translator.translate('status_matrix_loaded_into_visum')}")
+            self.tabMain.mark_exported(selected)
+        except Exception as exc:
+            logging.exception("Matrix export failed: %s", exc)
+            self.set_progress(0, 1, f"Export failed: {exc}")
+            wx.MessageBox(f"Matrix export failed:\n{exc}", "Error", wx.OK | wx.ICON_ERROR)
+        finally:
+            if wx.IsBusy():
+                wx.EndBusyCursor()
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
 
     ## Event handler for exporting Net results for all currently checked CFL levels.
     #  Iterates over checked CFL checkboxes and exports the network for each selected level.
@@ -561,12 +1064,27 @@ class DirectLineNetworkToolFrame(wx.Frame):
         if not selected:
             wx.MessageBox(self.translator.translate('error_no_calculator_instance'), 'Info', wx.OK | wx.ICON_INFORMATION)
             return
-        self.dln_calculator.export_net(links_additive=True, list_cfl=selected)
-        self.dln_calculator.delete_unused_nodes()
-        names = ", ".join(self.button_cfl_active[c].Label for c in selected)
-        self.SetStatusText(f"{names}: {self.translator.translate('status_net_exported_imported')}")
-        # Update status labels
-        self.tabMain.mark_exported(selected)
+        wx.BeginBusyCursor()
+        try:
+            self.set_progress(1, 3, "Exporting link network...")
+            self.dln_calculator.export_net(links_additive=True, list_cfl=selected)
+            self.set_progress(2, 3, "Cleaning unused nodes...")
+            self.dln_calculator.delete_unused_nodes()
+            names = ", ".join(self.button_cfl_active[c].Label for c in selected)
+            self.tabMain.mark_exported(selected)
+            self.set_progress(3, 3, f"{names}: {self.translator.translate('status_net_exported_imported')}")
+        except Exception as exc:
+            logging.exception("Failed to export link network: %s", exc)
+            self.set_progress(0, 1, f"Export failed: {exc}")
+            wx.MessageBox(f"Link network export failed:\n{exc}", "Error", wx.OK | wx.ICON_ERROR)
+        finally:
+            if wx.IsBusy():
+                wx.EndBusyCursor()
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
 
     ## Event handler for filtering links.
     #  Applies a filter to show only the links created by the calculator.
@@ -615,24 +1133,22 @@ class DirectLineNetworkToolFrame(wx.Frame):
     ## Updates all text elements in the GUI to the current language.
     #  Also triggers refresh_gui_text on child components.
     def refresh_gui_text(self):
-        #1 Update main window title
-        self.SetTitle(self.translator.translate('app_title'))
+        # 1. Update main window title & header
+        title = self.translator.translate('app_title')
+        self.SetTitle(title)
+        if hasattr(self, "lbl_header_title"):
+            self.lbl_header_title.SetLabel(title)
 
-        # 2. update notebook tab title
-        self.notebook.SetPageText(0, self.translator.translate('tab_main'))
-        self.notebook.SetPageText(1, self.translator.translate('tab_log'))
-
-        # 3. Update side panel buttons
-        self.btn_side_language.SetLabel(self.translator.translate('language_choice_title'))
+        # 2. Update side panel controls
+        self.lang_toggle.set_selected(self.translator.get_selected_language())
         self.btn_side_reset.SetLabel(self.translator.translate('menu_reset_calculations'))
         self.btn_side_defaults.SetLabel(self.translator.translate('menu_set_defaults'))
         self.btn_side_info.SetLabel(self.translator.translate('menu_info'))
         self.btn_side_filter.SetLabel(self.translator.translate('toolbar_filter_inserted_links'))
         self.btn_side_delete.SetLabel(self.translator.translate('toolbar_delete_inserted_links'))
 
-        # 5. Unterkomponenten (Tabs) aktualisieren
+        # 3. Update MainTab
         self.tabMain.refresh_gui_text()
-        self.tabLog.refresh_gui_text()
 
         # Update the status text
         self.SetStatusText(self.translator.translate('status_set_defaults'))
@@ -685,97 +1201,153 @@ class MainTab(wx.Panel):
     #  connectivity function level parameters, status column, calculate button,
     #  and a separate export section.
     def __set_layout__(self):
-        # Rows with individual elements (vbox_outer)
-        # Row 1: zone attribute selection
-        # Row 2: horizontal sizer with [cfl_vfs_settings box] + [Export_to_Visum box]
+        self.SetBackgroundColour(_PANDO_BG)
         vbox_outer = wx.BoxSizer(wx.VERTICAL)
 
-        # ---- Box 1: Zone Attribute Selection ----
-        self._box_zone_attrs = wx.StaticBox(self, label=self.translator.translate('zone_attributes'))
-        self.hbox1 = wx.StaticBoxSizer(self._box_zone_attrs, wx.HORIZONTAL)
+        # ---- Card 1: Zone Attribute Selection (3 strictly equal-width columns) ----
+        zone_wrap, zone_card, self._box_zone_attrs, zone_body = _make_pando_card(
+            self, self.translator.translate('zone_attributes')
+        )
+        zone_grid = wx.GridSizer(rows=1, cols=3, vgap=0, hgap=16)
 
-        # Selection of zone attributes
-        self.cb_cfl = wx.ComboBox(self, size=(200, -1), choices=self.TopLevelParent.list_attr,
-                                  style=wx.CB_DROPDOWN | wx.CB_READONLY | wx.CB_SORT)
+        sorted_attrs = sorted(self.TopLevelParent.list_attr)
+        optional_attrs = ["None"] + sorted_attrs
+
+        self.cb_cfl = wx.ComboBox(zone_card, choices=sorted_attrs,
+                                  style=wx.CB_DROPDOWN | wx.CB_READONLY)
         self.cb_cfl.Label = 'attr_cfl'
         self.TopLevelParent.cb_cfl = self.cb_cfl
 
-        self.cb_origin = wx.ComboBox(self, size=(200, -1), choices=self.TopLevelParent.list_attr,
-                                     style=wx.CB_DROPDOWN | wx.CB_READONLY | wx.CB_SORT)
+        self.cb_origin = wx.ComboBox(zone_card, choices=optional_attrs,
+                                     style=wx.CB_DROPDOWN | wx.CB_READONLY)
         self.cb_origin.Label = 'attr_origin'
         self.TopLevelParent.cb_origin = self.cb_origin
 
-        self.cb_destination = wx.ComboBox(self, size=(200, -1), choices=self.TopLevelParent.list_attr,
-                                          style=wx.CB_DROPDOWN | wx.CB_READONLY | wx.CB_SORT)
+        self.cb_destination = wx.ComboBox(zone_card, choices=optional_attrs,
+                                          style=wx.CB_DROPDOWN | wx.CB_READONLY)
         self.cb_destination.Label = 'attr_destination'
         self.TopLevelParent.cb_destination = self.cb_destination
 
-        self.static_text_centrality = wx.StaticText(self, -1, self.translator.translate('setting_zone_attribute_centrality'))
-        self.hbox1.Add(self.static_text_centrality, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.hbox1.Add(self.cb_cfl, 0, wx.ALL | wx.EXPAND, 15)
+        self.static_text_centrality = wx.StaticText(zone_card, -1, self.translator.translate('setting_zone_attribute_centrality'))
+        self.static_text_origin = wx.StaticText(zone_card, -1, self.translator.translate('setting_zone_attribute_origin'))
+        self.static_text_destination = wx.StaticText(zone_card, -1, self.translator.translate('setting_zone_attribute_destination'))
 
-        self.static_text_origin = wx.StaticText(self, -1, self.translator.translate('setting_zone_attribute_origin'))
-        self.hbox1.Add(self.static_text_origin, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.hbox1.Add(self.cb_origin, 0, wx.ALL | wx.EXPAND, 15)
+        for lbl, cb in (
+            (self.static_text_centrality, self.cb_cfl),
+            (self.static_text_origin, self.cb_origin),
+            (self.static_text_destination, self.cb_destination),
+        ):
+            lbl.SetForegroundColour(_PANDO_BODY)
+            cb.SetMinSize((-1, 30))
+            col_box = wx.BoxSizer(wx.VERTICAL)
+            col_box.Add(lbl, 0, wx.BOTTOM, 6)
+            col_box.AddStretchSpacer(1)
+            col_box.Add(cb, 0, wx.EXPAND)
+            zone_grid.Add(col_box, 1, wx.EXPAND)
 
-        self.static_text_destination = wx.StaticText(self, -1, self.translator.translate('setting_zone_attribute_destination'))
-        self.hbox1.Add(self.static_text_destination, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.hbox1.Add(self.cb_destination, 0, wx.ALL | wx.EXPAND, 15)
+        zone_body.Add(zone_grid, 0, wx.EXPAND)
+        self.hbox1 = zone_wrap
 
-        # ---- Box 2: CFL/VFS Settings (FlexGridSizer for equal-width columns) ----
-        self._box_cfl = wx.StaticBox(self, label=self.translator.translate('cfl_vfs_settings'))
-        self._gridbox_sizer = wx.StaticBoxSizer(self._box_cfl, wx.VERTICAL)
+        # ---- Card 2: CFL/VFS Settings (Visum-style table with multi-cell editing) ----
+        cfl_wrap, cfl_card, self._box_cfl, self._gridbox_sizer = _make_pando_card(
+            self, self.translator.translate('cfl_vfs_settings')
+        )
 
-        # Use FlexGridSizer: rows = header(0) + 6 CFL rows = 7 rows
-        # Distance row and Calculate button live BELOW the grid in a shared bottom strip
-        # Columns: 0=CFL, 1=AttrVal, 2=Exchange, 3=Supply, 4=Status
-        NUM_COLS = 5
-        self.gridbagsizer1 = wx.FlexGridSizer(rows=7, cols=NUM_COLS, vgap=6, hgap=8)
-        for col in range(NUM_COLS):
-            self.gridbagsizer1.AddGrowableCol(col, 1)  # all columns grow equally
-
+        self._cfl_keys = ["cfl_0", "cfl_1", "cfl_2", "cfl_3", "cfl_4", "cfl_5"]
         str_cfl = self.translator.translate('cfl')
+        self._grid_header_specs = [
+            ("", ""),
+            ("", ""),
+            ("", ""),
+            ("", ""),
+            ("", ""),
+            ("", ""),
+        ]
+        self._last_grid_width = -1
+        self._resizing_grid = False
 
-        # --- Header row ---
-        self.static_text_cfl_label = wx.StaticText(self, -1, self.translator.translate('setting_cfl'))
-        self.static_text_attr_cfl = wx.StaticText(self, -1, self.translator.translate('setting_attribute_value_CFL'))
-        self.static_text_exchange_fcn = wx.StaticText(self, -1, self.translator.translate('setting_exchange_function'))
-        self.static_text_supply_fcn = wx.StaticText(self, -1, self.translator.translate('setting_supply_function'))
-        self.static_text_status_header = wx.StaticText(self, -1, self.translator.translate('setting_status'))
+        # Crisp 1px flat border around the entire grid (ensures all 4 sides incl. left border are visible, no 3D shadow)
+        grid_border = wx.Panel(cfl_card, style=wx.NO_BORDER)
+        grid_border.SetBackgroundColour(_PANDO_BORDER)
+        grid_border_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        for hdr in (self.static_text_cfl_label, self.static_text_attr_cfl,
-                    self.static_text_exchange_fcn, self.static_text_supply_fcn,
-                    self.static_text_status_header):
-            hdr.SetFont(hdr.GetFont().Bold())
-            self.gridbagsizer1.Add(hdr, 0, wx.EXPAND | wx.ALL, 4)
+        self.cfl_grid = wx.grid.Grid(grid_border, style=wx.BORDER_NONE)
+        self.cfl_grid.CreateGrid(len(self._cfl_keys), 6)
+        self.cfl_grid.EnableEditing(True)
+        self.cfl_grid.EnableDragRowSize(False)
+        self.cfl_grid.EnableDragColMove(False)
+        self.cfl_grid.EnableDragColSize(False)
+        self.cfl_grid.SetMargins(0, 0)
+        self.cfl_grid.ShowScrollbars(wx.SHOW_SB_NEVER, wx.SHOW_SB_NEVER)
+        self.cfl_grid.SetRowLabelSize(0)
+        self.cfl_grid.SetColLabelSize(46)
+        self.cfl_grid.SetDefaultRowSize(32, True)
+        self.cfl_grid.SetGridLineColour(_PANDO_BORDER_SOFT)
+        self.cfl_grid.SetLabelBackgroundColour(wx.Colour(226, 232, 240))
+        self.cfl_grid.SetLabelTextColour(_PANDO_TEXT)
+        self.cfl_grid.SetSelectionBackground(wx.Colour(219, 234, 254))
+        self.cfl_grid.SetSelectionForeground(_PANDO_TEXT)
+        self.cfl_grid.SetDefaultCellBackgroundColour(_PANDO_CARD)
+        self.cfl_grid.SetDefaultCellTextColour(_PANDO_TEXT)
+        self.cfl_grid.SetDefaultCellAlignment(wx.ALIGN_CENTER, wx.ALIGN_CENTER)
+        self.cfl_grid.SetCellHighlightColour(_PANDO_BLUE)
+        self.cfl_grid.SetCellHighlightPenWidth(1)
 
-        # --- CFL rows (rows 1-6) ---
-        self.button_cfl_active = {
-            "cfl_0": wx.CheckBox(self, -1, f"{str_cfl} 0"),
-            "cfl_1": wx.CheckBox(self, -1, f"{str_cfl} 1"),
-            "cfl_2": wx.CheckBox(self, -1, f"{str_cfl} 2"),
-            "cfl_3": wx.CheckBox(self, -1, f"{str_cfl} 3"),
-            "cfl_4": wx.CheckBox(self, -1, f"{str_cfl} 4"),
-            "cfl_5": wx.CheckBox(self, -1, f"{str_cfl} 5"),
-        }
-        self.buttons_cfl_value = {k: wx.SpinCtrl(self, -1, "") for k in self.button_cfl_active}
-        self.buttons_value_k_neighbor_cfl = {k: wx.SpinCtrl(self, -1, "") for k in self.button_cfl_active}
-        self.buttons_value_n_supplier = {k: wx.SpinCtrl(self, -1, "") for k in self.button_cfl_active}
+        # Custom flat, shadow-free two-line header painter (bold title + thin subtitle)
+        col_lbl_win = self.cfl_grid.GetGridColLabelWindow()
+        col_lbl_win.Bind(wx.EVT_PAINT, self._on_col_label_paint)
+        col_lbl_win.Bind(wx.EVT_ERASE_BACKGROUND, lambda e: None)
 
-        # Status labels + internal state
-        _INACTIVE_COLOR = wx.Colour(150, 150, 150)
-        for cfl_key in self.button_cfl_active:
+        self._apply_grid_headers()
+
+        # Compute text-based equal minimum width across all 5 data columns (cols 1..5)
+        self._min_data_col_w = self._compute_min_data_col_width()
+        self.cfl_grid.SetColSize(0, 44)
+        for col_idx in range(1, 6):
+            self.cfl_grid.SetColSize(col_idx, self._min_data_col_w)
+
+        self.button_cfl_active = {}
+        self.buttons_cfl_value = {}
+        self.buttons_value_k_neighbor_cfl = {}
+        self.buttons_value_n_supplier = {}
+        self.status_labels = {}
+
+        cfl_num_font = self.cfl_grid.GetDefaultCellFont()
+        cfl_num_font.SetWeight(wx.FONTWEIGHT_BOLD)
+
+        for row_idx, cfl_key in enumerate(self._cfl_keys):
+            # Col 0: Active checkbox (centered PANDO style)
+            self.cfl_grid.SetCellRenderer(row_idx, 0, _CenteredBoolRenderer())
+            self.cfl_grid.SetCellEditor(row_idx, 0, wx.grid.GridCellBoolEditor())
+            self.cfl_grid.SetCellAlignment(row_idx, 0, wx.ALIGN_CENTER, wx.ALIGN_CENTER)
+            self.cfl_grid.SetCellValue(row_idx, 0, "")
+            # Col 1: CFL number only (read-only, centered)
+            self.cfl_grid.SetCellValue(row_idx, 1, str(row_idx))
+            self.cfl_grid.SetReadOnly(row_idx, 1, True)
+            self.cfl_grid.SetCellAlignment(row_idx, 1, wx.ALIGN_CENTER, wx.ALIGN_CENTER)
+            self.cfl_grid.SetCellFont(row_idx, 1, cfl_num_font)
+            # Cols 2, 3, 4: Direct plain-text numeric editing (no SpinCtrl arrows)
+            for col_idx in (2, 3, 4):
+                self.cfl_grid.SetCellEditor(row_idx, col_idx, wx.grid.GridCellTextEditor())
+            # Col 5: Status (read-only)
+            self.cfl_grid.SetReadOnly(row_idx, 5, True)
+
+            self.button_cfl_active[cfl_key] = _GridBoolProxy(self.cfl_grid, row_idx, f"{str_cfl} {row_idx}")
+            self.buttons_cfl_value[cfl_key] = _GridIntProxy(self.cfl_grid, row_idx, 2)
+            self.buttons_value_k_neighbor_cfl[cfl_key] = _GridIntProxy(self.cfl_grid, row_idx, 3)
+            self.buttons_value_n_supplier[cfl_key] = _GridIntProxy(self.cfl_grid, row_idx, 4)
+
             self._cfl_status[cfl_key] = 'inactive'
-            lbl = wx.StaticText(self, -1, self.translator.translate('status_inactive'))
-            lbl.SetForegroundColour(_INACTIVE_COLOR)
-            self.status_labels[cfl_key] = lbl
+            self._set_row_status(cfl_key, 'inactive')
+            self.buttons_cfl_value[cfl_key].Enable(False)
+            self.buttons_value_k_neighbor_cfl[cfl_key].Enable(False)
+            self.buttons_value_n_supplier[cfl_key].Enable(False)
+            self._apply_row_visual_state(row_idx, False)
 
-        for cfl_key in self.button_cfl_active:
-            self.gridbagsizer1.Add(self.button_cfl_active[cfl_key],    0, wx.EXPAND | wx.ALL, 3)
-            self.gridbagsizer1.Add(self.buttons_cfl_value[cfl_key],    0, wx.EXPAND | wx.ALL, 3)
-            self.gridbagsizer1.Add(self.buttons_value_k_neighbor_cfl[cfl_key], 0, wx.EXPAND | wx.ALL, 3)
-            self.gridbagsizer1.Add(self.buttons_value_n_supplier[cfl_key],     0, wx.EXPAND | wx.ALL, 3)
-            self.gridbagsizer1.Add(self.status_labels[cfl_key],        0, wx.EXPAND | wx.ALL, 3)
+        grid_h = 46 + len(self._cfl_keys) * 32
+        self.cfl_grid.SetMinSize((44 + 5 * self._min_data_col_w, grid_h))
+        grid_border_sizer.Add(self.cfl_grid, 1, wx.EXPAND | wx.ALL, 1)
+        grid_border.SetSizer(grid_border_sizer)
 
         # Share references with TopLevelParent
         self.TopLevelParent.button_cfl_active = self.button_cfl_active
@@ -783,71 +1355,67 @@ class MainTab(wx.Panel):
         self.TopLevelParent.buttons_value_k_neighbor_cfl = self.buttons_value_k_neighbor_cfl
         self.TopLevelParent.buttons_value_n_supplier = self.buttons_value_n_supplier
 
-        # Initially disable all CFL SpinCtrls – enabled when checkbox is ticked
-        for cfl_key in self.button_cfl_active:
-            self.buttons_cfl_value[cfl_key].Enable(False)
-            self.buttons_value_k_neighbor_cfl[cfl_key].Enable(False)
-            self.buttons_value_n_supplier[cfl_key].Enable(False)
+        self._gridbox_sizer.Add(grid_border, 1, wx.EXPAND | wx.BOTTOM, 10)
 
-        self._gridbox_sizer.Add(self.gridbagsizer1, 1, wx.ALL | wx.EXPAND, 6)
+        # Clean 1px hairline divider above bottom strip
+        calc_div = wx.Panel(cfl_card, size=(-1, 1), style=wx.NO_BORDER)
+        calc_div.SetMinSize((-1, 1))
+        calc_div.SetMaxSize((-1, 1))
+        calc_div.SetBackgroundColour(_PANDO_BORDER_SOFT)
+        self._gridbox_sizer.Add(calc_div, 0, wx.EXPAND | wx.BOTTOM, 10)
 
-        # --- Bottom strip: distance function (cols 0-2) + calculate button (cols 3-4) ---
-        # Both live outside the FlexGrid so the grid rows are never squished,
-        # and the dist label/combo are vertically aligned with the calculate button.
-        self.cb_dist_fcn = wx.ComboBox(self, size=(150, -1),
-                                       choices=["euclidean"],
-                                       style=wx.CB_DROPDOWN | wx.CB_READONLY | wx.CB_SORT)
-        self.cb_dist_fcn.Label = 'attr_dist_fcn'
-        self.TopLevelParent.cb_dist_fcn = self.cb_dist_fcn
+        # --- Bottom strip: compact muted distance info text + PANDO green Calculate button ---
+        self.static_text_dist_fcn_label = wx.StaticText(cfl_card, -1, self.translator.translate('label_distance_calculation_function'))
+        d_font = self.static_text_dist_fcn_label.GetFont()
+        d_font.SetPointSize(8)
+        self.static_text_dist_fcn_label.SetFont(d_font)
+        self.static_text_dist_fcn_label.SetForegroundColour(_PANDO_MUTED)
 
-        self.static_text_dist_fcn_label = wx.StaticText(self, -1, self.translator.translate('label_distance_calculation_function'))
+        self.btn_calculate = _PandoButton(cfl_card, self.translator.translate('btn_calculate'), variant="green", height=40)
+        self.btn_calculate.SetMinSize((200, 40))
 
-        self.btn_calculate = wx.Button(self, -1, self.translator.translate('btn_calculate'))
-        self.btn_calculate.SetMinSize((-1, 50))  # double height
-
-        # Left part: dist label + combo (fixed width, not expanding), then spacer fills the rest
-        _dist_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        _dist_sizer.Add(self.static_text_dist_fcn_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
-        _dist_sizer.Add(self.cb_dist_fcn, 0, wx.ALIGN_CENTER_VERTICAL)
-        _dist_sizer.AddStretchSpacer(1)
-
-        # Bottom strip: dist (3 parts) + calculate button (2 parts)
         _bottom_strip = wx.BoxSizer(wx.HORIZONTAL)
-        _bottom_strip.Add(_dist_sizer, 3, wx.EXPAND | wx.ALL, 4)
-        _bottom_strip.Add(self.btn_calculate, 2, wx.EXPAND | wx.ALL, 4)
+        _bottom_strip.Add(self.static_text_dist_fcn_label, 1, wx.ALIGN_CENTER_VERTICAL)
+        _bottom_strip.Add(self.btn_calculate, 0, wx.ALIGN_CENTER_VERTICAL)
+        self._gridbox_sizer.Add(_bottom_strip, 0, wx.EXPAND)
 
-        self._gridbox_sizer.Add(_bottom_strip, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+        # ---- Card 3: Export to Visum ----
+        export_wrap, export_card, self._box_export, self._export_sizer = _make_pando_card(
+            self, self.translator.translate('export_to_visum_section')
+        )
+        self.static_text_visum_as = None
 
-        # ---- Box 3: Export to Visum ----
-        self._box_export = wx.StaticBox(self, label=self.translator.translate('export_to_visum_section'))
-        self._export_sizer = wx.StaticBoxSizer(self._box_export, wx.VERTICAL)
-
-        self.static_text_visum_as = None  # removed duplicate label (box title already shows this)
-
-        _btn_size = (-1, 50)
-        self.btn_export_mtx = wx.Button(self, -1, self.translator.translate('btn_export_mtx'))
+        _btn_size = (185, 40)
+        self.btn_export_mtx = _PandoButton(export_card, self.translator.translate('btn_export_mtx'), variant="secondary", height=40)
         self.btn_export_mtx.SetMinSize(_btn_size)
-        self._export_sizer.Add(self.btn_export_mtx, 0, wx.EXPAND | wx.ALL, 4)
+        self._export_sizer.Add(self.btn_export_mtx, 0, wx.EXPAND | wx.BOTTOM, 6)
 
-        self.btn_export_net = wx.Button(self, -1, self.translator.translate('btn_export_net'))
+        self.cb_overwrite_matrix = wx.CheckBox(export_card, -1, self.translator.translate('setting_overwrite_matrix'))
+        self.cb_overwrite_matrix.SetValue(True)
+        self.cb_overwrite_matrix.SetForegroundColour(_PANDO_BODY)
+        self._export_sizer.Add(self.cb_overwrite_matrix, 0, wx.EXPAND | wx.LEFT | wx.BOTTOM, 12)
+
+        self.btn_export_net = _PandoButton(export_card, self.translator.translate('btn_export_net'), variant="secondary", height=40)
         self.btn_export_net.SetMinSize(_btn_size)
-        self._export_sizer.Add(self.btn_export_net, 0, wx.EXPAND | wx.ALL, 4)
+        self._export_sizer.Add(self.btn_export_net, 0, wx.EXPAND | wx.BOTTOM, 8)
 
-        self.btn_export_master = wx.Button(self, -1, self.translator.translate('setting_import_to_visum'))
+        self.btn_export_master = _PandoButton(export_card, self.translator.translate('setting_import_to_visum'), variant="blue", height=40)
         self.btn_export_master.cfl_level = 'all'
         self.btn_export_master.SetMinSize(_btn_size)
-        self._export_sizer.Add(self.btn_export_master, 0, wx.EXPAND | wx.ALL, 4)
+        self._export_sizer.Add(self.btn_export_master, 0, wx.EXPAND)
+        self._export_sizer.AddStretchSpacer()
 
-        # Start with export buttons greyed out
+        # Start with export buttons disabled in PANDO muted style
         self._set_export_buttons_state(enabled=False)
 
-        # ---- Horizontal container: settings + export ----
+        # ---- Horizontal container: calculation card + export card ----
         hbox_main = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_main.Add(self._gridbox_sizer, 3, wx.ALL | wx.EXPAND, 5)
-        hbox_main.Add(self._export_sizer,  1, wx.ALL | wx.EXPAND, 5)
+        hbox_main.Add(cfl_wrap, 3, wx.EXPAND | wx.RIGHT, 12)
+        hbox_main.Add(export_wrap, 0, wx.EXPAND)
 
-        vbox_outer.Add(self.hbox1, 0, wx.ALL | wx.EXPAND, 5)
-        vbox_outer.Add(hbox_main,  1, wx.ALL | wx.EXPAND, 5)
+        vbox_outer.Add(zone_wrap, 0, wx.EXPAND | wx.BOTTOM, 12)
+        vbox_outer.Add(hbox_main, 1, wx.EXPAND)
+
         self.SetSizer(vbox_outer)
 
         # ==== Event binding
@@ -855,90 +1423,255 @@ class MainTab(wx.Panel):
     ## Binds event handlers to UI elements in the main tab.
     #  Sets up all event bindings for buttons and combo boxes in the main tab,
     #  connecting them to the appropriate event handlers in the parent frame.
-    def __bind_events__(self):
+    def _apply_grid_headers(self):
+        def _pair(title_key, sub_key):
+            t = self.translator.translate(title_key)
+            s = self.translator.translate(sub_key) if sub_key else ""
+            return (t, s)
 
+        self._grid_header_specs = [
+            ("", ""),
+            _pair('setting_cfl', 'setting_cfl_sub'),
+            _pair('setting_attribute_value_CFL', 'setting_attribute_value_CFL_sub'),
+            _pair('setting_exchange_function', 'setting_exchange_function_sub'),
+            _pair('setting_supply_function', 'setting_supply_function_sub'),
+            _pair('setting_status', 'setting_status_sub'),
+        ]
+        for idx, (t, s) in enumerate(self._grid_header_specs):
+            self.cfl_grid.SetColLabelValue(idx, f"{t}\n{s}" if s else t)
+        self.cfl_grid.GetGridColLabelWindow().Refresh()
+
+    def _compute_min_data_col_width(self) -> int:
+        """Measure header titles & subtitles across all languages to find a uniform column width."""
+        dc = wx.ClientDC(self.cfl_grid)
+        title_font = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        sub_font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        keys = [
+            ('setting_cfl', 'setting_cfl_sub'),
+            ('setting_attribute_value_CFL', 'setting_attribute_value_CFL_sub'),
+            ('setting_exchange_function', 'setting_exchange_function_sub'),
+            ('setting_supply_function', 'setting_supply_function_sub'),
+            ('setting_status', 'setting_status_sub'),
+        ]
+        max_w = 130
+        all_langs = getattr(self.translator, 'translations', {}) or {}
+        if all_langs:
+            for lang_dict in all_langs.values():
+                for tk, sk in keys:
+                    t = str(lang_dict.get(tk, '') or '')
+                    s = str(lang_dict.get(sk, '') or '')
+                    if t:
+                        dc.SetFont(title_font)
+                        max_w = max(max_w, dc.GetTextExtent(t)[0] + 22)
+                    if s:
+                        dc.SetFont(sub_font)
+                        max_w = max(max_w, dc.GetTextExtent(s)[0] + 22)
+        else:
+            for t, s in self._grid_header_specs[1:]:
+                if t:
+                    dc.SetFont(title_font)
+                    max_w = max(max_w, dc.GetTextExtent(t)[0] + 22)
+                if s:
+                    dc.SetFont(sub_font)
+                    max_w = max(max_w, dc.GetTextExtent(s)[0] + 22)
+        return max_w
+
+    def _on_col_label_paint(self, event):
+        try:
+            win = self.cfl_grid.GetGridColLabelWindow()
+            dc = wx.PaintDC(win)
+            w, h = win.GetClientSize()
+
+            # Flat slightly darker-gray header background (no 3D bevel/shadow)
+            header_bg = wx.Colour(226, 232, 240)
+            dc.SetPen(wx.TRANSPARENT_PEN)
+            dc.SetBrush(wx.Brush(header_bg))
+            dc.DrawRectangle(0, 0, w, h)
+
+            title_font = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+            sub_font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+            border_pen = wx.Pen(_PANDO_BORDER, 1)
+
+            x = 0
+            num_cols = self.cfl_grid.GetNumberCols()
+            for col in range(num_cols):
+                cw = self.cfl_grid.GetColSize(col)
+                title, sub = self._grid_header_specs[col] if col < len(self._grid_header_specs) else ("", "")
+
+                # Clip text strictly inside this column so nothing can ever bleed into the next cell
+                dc.SetClippingRegion(x, 0, max(1, cw - 1), h)
+                if title and sub:
+                    dc.SetFont(title_font)
+                    tw, th = dc.GetTextExtent(title)
+                    dc.SetFont(sub_font)
+                    sw, sh = dc.GetTextExtent(sub)
+                    total_h = th + 2 + sh
+                    top_y = max(2, (h - total_h) // 2)
+
+                    dc.SetFont(title_font)
+                    dc.SetTextForeground(_PANDO_TEXT)
+                    dc.DrawText(title, x + max(4, (cw - tw) // 2), top_y)
+
+                    dc.SetFont(sub_font)
+                    dc.SetTextForeground(_PANDO_BODY)
+                    dc.DrawText(sub, x + max(4, (cw - sw) // 2), top_y + th + 2)
+                elif title:
+                    dc.SetFont(title_font)
+                    tw, th = dc.GetTextExtent(title)
+                    dc.SetTextForeground(_PANDO_TEXT)
+                    dc.DrawText(title, x + max(4, (cw - tw) // 2), max(2, (h - th) // 2))
+                dc.DestroyClippingRegion()
+
+                # Crisp 1px vertical column divider
+                if col < num_cols - 1:
+                    dc.SetPen(border_pen)
+                    dc.DrawLine(x + cw - 1, 0, x + cw - 1, h)
+                x += cw
+
+            # Crisp 1px bottom line separating header from lighter rows below
+            dc.SetPen(border_pen)
+            dc.DrawLine(0, h - 1, w, h - 1)
+        except Exception:
+            logging.exception("Error painting grid column headers")
+
+    def __bind_events__(self):
         self.btn_export_mtx.Bind(wx.EVT_BUTTON, self.TopLevelParent.event_export_mtx_selected)
         self.btn_export_net.Bind(wx.EVT_BUTTON, self.TopLevelParent.event_export_net_selected)
-
         self.btn_export_master.Bind(wx.EVT_BUTTON, self.TopLevelParent.event_export_master)
-
-        # Calculate button
         self.btn_calculate.Bind(wx.EVT_BUTTON, self.on_calculate)
 
         self.cb_cfl.Bind(wx.EVT_COMBOBOX, self.TopLevelParent.event_choose_attr)
         self.cb_origin.Bind(wx.EVT_COMBOBOX, self.TopLevelParent.event_choose_attr)
         self.cb_destination.Bind(wx.EVT_COMBOBOX, self.TopLevelParent.event_choose_attr)
-        self.cb_dist_fcn.Bind(wx.EVT_COMBOBOX, self._on_settings_changed)
-        self.cb_dist_fcn.Bind(wx.EVT_COMBOBOX, self.TopLevelParent.event_choose_attr)
 
-        # Enable/disable SpinCtrls based on checkbox state; also mark status outdated on change
-        for cfl_key, checkbox in self.button_cfl_active.items():
-            checkbox.Bind(wx.EVT_CHECKBOX, self.on_cfl_checkbox_toggle)
-        for cfl_key in self.button_cfl_active:
-            for spin in (self.buttons_cfl_value[cfl_key],
-                         self.buttons_value_k_neighbor_cfl[cfl_key],
-                         self.buttons_value_n_supplier[cfl_key]):
-                spin.cfl_key = cfl_key   # attach key as attribute
-                spin.Bind(wx.EVT_SPINCTRL, self._on_spin_changed)
+        self.cfl_grid.Bind(wx.grid.EVT_GRID_CELL_LEFT_CLICK, self._on_grid_cell_click)
+        self.cfl_grid.Bind(wx.grid.EVT_GRID_CELL_CHANGED, self._on_grid_cell_changed)
+        self.cfl_grid.Bind(wx.EVT_SIZE, self._on_grid_resize)
 
+    def _on_grid_resize(self, event):
+        try:
+            if self._resizing_grid:
+                event.Skip()
+                return
+            total_w = self.cfl_grid.GetClientSize().width
+            if total_w > 260 and total_w != self._last_grid_width:
+                self._resizing_grid = True
+                self._last_grid_width = total_w
+                w_active = 44
+                rem = max(5 * self._min_data_col_w, total_w - w_active)
+                col_w = rem // 5
+                last_w = rem - 4 * col_w
+                self.cfl_grid.SetColSize(0, w_active)
+                for c in range(1, 5):
+                    self.cfl_grid.SetColSize(c, col_w)
+                self.cfl_grid.SetColSize(5, last_w)
+                self.cfl_grid.GetGridColLabelWindow().Refresh()
+                self._resizing_grid = False
+        except Exception:
+            self._resizing_grid = False
+            logging.exception("Error resizing CFL grid")
+        event.Skip()
 
-    ## Enables or disables the three SpinCtrl fields for a CFL row based on its checkbox state.
-    #  @param event The checkbox event. The event object's GetEventObject() identifies which checkbox fired.
-    def on_cfl_checkbox_toggle(self, event):
-        checkbox = event.GetEventObject()
-        cfl_key = next((k for k, cb in self.button_cfl_active.items() if cb is checkbox), None)
-        if cfl_key is None:
-            return
-        enabled = checkbox.IsChecked()
+    def _selected_cells(self) -> list[tuple[int, int]]:
+        cells: set[tuple[int, int]] = set()
+        for coord in self.cfl_grid.GetSelectedCells():
+            cells.add((coord.GetRow(), coord.GetCol()))
+        for tl, br in zip(
+            self.cfl_grid.GetSelectionBlockTopLeft(),
+            self.cfl_grid.GetSelectionBlockBottomRight(),
+        ):
+            for r in range(tl.GetRow(), br.GetRow() + 1):
+                for c in range(tl.GetCol(), br.GetCol() + 1):
+                    cells.add((r, c))
+        for r in self.cfl_grid.GetSelectedRows():
+            for c in range(self.cfl_grid.GetNumberCols()):
+                cells.add((r, c))
+        return sorted(cells)
+
+    def _apply_row_visual_state(self, row: int, enabled: bool):
+        """Apply uniform white (active) or soft gray (inactive) background across ALL 6 columns."""
+        bg = _PANDO_CARD if enabled else _PANDO_DISABLED_BG
+        for col in range(6):
+            self.cfl_grid.SetCellBackgroundColour(row, col, bg)
+        self.cfl_grid.SetCellTextColour(row, 1, _PANDO_TEXT if enabled else _PANDO_DISABLED_FG)
+
+    def _toggle_row_active(self, row: int, enabled: bool):
+        cfl_key = self._cfl_keys[row]
+        self.cfl_grid.SetCellValue(row, 0, "1" if enabled else "")
         self.buttons_cfl_value[cfl_key].Enable(enabled)
         self.buttons_value_k_neighbor_cfl[cfl_key].Enable(enabled)
         self.buttons_value_n_supplier[cfl_key].Enable(enabled)
-        # Update status
+        self._apply_row_visual_state(row, enabled)
         if enabled:
-            # Only mark as not-calculated if it was inactive before
             if self._cfl_status[cfl_key] == 'inactive':
                 self._set_row_status(cfl_key, 'not_calculated')
         else:
             self._set_row_status(cfl_key, 'inactive')
-        self._refresh_export_button_state()
+
+    def _on_grid_cell_click(self, event):
+        try:
+            row, col = event.GetRow(), event.GetCol()
+            if col == 0 and 0 <= row < len(self._cfl_keys):
+                new_state = not (self.cfl_grid.GetCellValue(row, 0) == "1")
+                sel = self._selected_cells()
+                target_rows = sorted({r for r, c in sel if c == 0}) if (row, 0) in sel and len(sel) > 1 else [row]
+                for r in target_rows:
+                    self._toggle_row_active(r, new_state)
+                self._refresh_export_button_state()
+                self.cfl_grid.ForceRefresh()
+                return
+        except Exception:
+            logging.exception("Error handling CFL grid cell click")
         event.Skip()
 
-    ## Marks a row as outdated when a SpinCtrl value is changed after calculation.
-    def _on_spin_changed(self, event):
-        spin = event.GetEventObject()
-        cfl_key = getattr(spin, 'cfl_key', None)
-        if cfl_key and self._cfl_status.get(cfl_key) in ('calculated', 'exported'):
-            self._set_row_status(cfl_key, 'outdated')
-            self._refresh_export_button_state()
-        event.Skip()
-
-    ## Marks all active rows as outdated when distance function changes.
-    def _on_settings_changed(self, event):
-        for cfl_key, status in self._cfl_status.items():
-            if status in ('calculated', 'exported'):
-                self._set_row_status(cfl_key, 'outdated')
-        self._refresh_export_button_state()
+    def _on_grid_cell_changed(self, event):
+        try:
+            row, col = event.GetRow(), event.GetCol()
+            if col == 0:
+                self._toggle_row_active(row, self.cfl_grid.GetCellValue(row, 0) == "1")
+                self._refresh_export_button_state()
+                self.cfl_grid.ForceRefresh()
+                return
+            if col in (2, 3, 4):
+                val_str = self.cfl_grid.GetCellValue(row, col).strip()
+                try:
+                    val_int = max(0, int(float(val_str)))
+                except (ValueError, TypeError):
+                    val_int = 0
+                # Visum-style multi-cell fill: if multiple editable numeric cells are selected, apply value to all of them
+                sel = self._selected_cells()
+                targets = [(r, c) for r, c in sel if c in (2, 3, 4) and not self.cfl_grid.IsReadOnly(r, c)]
+                if (row, col) not in targets:
+                    targets.append((row, col))
+                for r, c in targets:
+                    self.cfl_grid.SetCellValue(r, c, str(val_int))
+                    cfl_key = self._cfl_keys[r]
+                    if self._cfl_status.get(cfl_key) in ('calculated', 'exported'):
+                        self._set_row_status(cfl_key, 'outdated')
+                self._refresh_export_button_state()
+                self.cfl_grid.ForceRefresh()
+        except Exception:
+            logging.exception("Error handling CFL grid cell change")
         event.Skip()
 
     ## Performs the calculation and updates status labels.
     def on_calculate(self, event):
         self.TopLevelParent.event_calculate(event)
-        # Mark all active (non-inactive) rows as calculated
         for cfl_key, cb in self.button_cfl_active.items():
             if cb.IsChecked():
                 self._set_row_status(cfl_key, 'calculated')
         self._refresh_export_button_state()
 
-    ## Sets the status of a single CFL row and updates its label colour.
+    ## Sets the status of a single CFL row and updates its cell colour.
     def _set_row_status(self, cfl_key, status):
         self._cfl_status[cfl_key] = status
-        lbl = self.status_labels[cfl_key]
+        row_idx = self._cfl_keys.index(cfl_key)
         _colors = {
             'not_calculated': wx.Colour(180, 80, 0),
-            'calculated':     wx.Colour(0, 140, 0),
+            'calculated':     wx.Colour(5, 150, 105),
             'outdated':       wx.Colour(180, 130, 0),
-            'exported':       wx.Colour(0, 100, 180),
-            'inactive':       wx.Colour(150, 150, 150),
+            'exported':       _PANDO_BLUE,
+            'inactive':       _PANDO_MUTED,
         }
         _keys = {
             'not_calculated': 'status_not_calculated',
@@ -947,9 +1680,9 @@ class MainTab(wx.Panel):
             'exported':       'status_exported',
             'inactive':       'status_inactive',
         }
-        lbl.SetLabel(self.translator.translate(_keys[status]))
-        lbl.SetForegroundColour(_colors.get(status, wx.Colour(0, 0, 0)))
-        lbl.Refresh()
+        self.cfl_grid.SetCellValue(row_idx, 5, self.translator.translate(_keys[status]))
+        self.cfl_grid.SetCellTextColour(row_idx, 5, _colors.get(status, _PANDO_TEXT))
+        self.cfl_grid.ForceRefresh()
 
     ## Enables or greys-out the export buttons depending on whether all active rows are 'calculated' or 'exported'.
     def _refresh_export_button_state(self):
@@ -959,14 +1692,10 @@ class MainTab(wx.Panel):
         all_ready = active_statuses and all(s in ('calculated', 'exported') for s in active_statuses)
         self._set_export_buttons_state(all_ready)
 
-    ## Enables or disables (greys out) the export buttons.
+    ## Enables or disables (greys out) the export buttons in PANDO style.
     def _set_export_buttons_state(self, enabled: bool):
-        _grey = wx.Colour(180, 180, 180)
-        _normal = wx.NullColour
         for btn in (self.btn_export_mtx, self.btn_export_net, self.btn_export_master):
             btn.Enable(enabled)
-            btn.SetBackgroundColour(_normal if enabled else _grey)
-            btn.Refresh()
 
     ## Marks all active rows as 'exported'; called after a successful export.
     def mark_exported(self, cfl_keys=None):
@@ -979,39 +1708,29 @@ class MainTab(wx.Panel):
 
     ## Updates all text elements in the main tab to the current language.
     def refresh_gui_text(self):
-        # Update StaticBox labels
         self._box_zone_attrs.SetLabel(self.translator.translate('zone_attributes'))
         self._box_cfl.SetLabel(self.translator.translate('cfl_vfs_settings'))
         self._box_export.SetLabel(self.translator.translate('export_to_visum_section'))
 
-        # Update StaticText widgets
         self.static_text_centrality.SetLabel(self.translator.translate('setting_zone_attribute_centrality'))
         self.static_text_origin.SetLabel(self.translator.translate('setting_zone_attribute_origin'))
         self.static_text_destination.SetLabel(self.translator.translate('setting_zone_attribute_destination'))
-        self.static_text_cfl_label.SetLabel(self.translator.translate('setting_cfl'))
-        self.static_text_attr_cfl.SetLabel(self.translator.translate('setting_attribute_value_CFL'))
-        self.static_text_exchange_fcn.SetLabel(self.translator.translate('setting_exchange_function'))
-        self.static_text_supply_fcn.SetLabel(self.translator.translate('setting_supply_function'))
-        self.static_text_status_header.SetLabel(self.translator.translate('setting_status'))
         self.static_text_dist_fcn_label.SetLabel(self.translator.translate('label_distance_calculation_function'))
 
-        # Update Calculate button
-        self.btn_calculate.SetLabel(self.translator.translate('btn_calculate'))
+        self._apply_grid_headers()
+        str_cfl = self.translator.translate('cfl')
+        for row_idx, key in enumerate(self._cfl_keys):
+            self.cfl_grid.SetCellValue(row_idx, 1, str(row_idx))
+            self.button_cfl_active[key].SetLabel(f"{str_cfl} {row_idx}")
 
-        # Update CheckBox labels
-        for key, checkbox in self.button_cfl_active.items():
-            str_cfl = self.translator.translate('cfl')
-            no_cfl = int(key.split('_')[1])
-            checkbox.SetLabel(f"{str_cfl} {no_cfl}")
-
-        # Update status labels to current language keeping their current state
         for cfl_key, status in self._cfl_status.items():
             self._set_row_status(cfl_key, status)
 
-        # Update master export button label
+        self.btn_calculate.SetLabel(self.translator.translate('btn_calculate'))
         self.btn_export_master.SetLabel(self.translator.translate('setting_import_to_visum'))
         self.btn_export_mtx.SetLabel(self.translator.translate('btn_export_mtx'))
         self.btn_export_net.SetLabel(self.translator.translate('btn_export_net'))
+        self.cb_overwrite_matrix.SetLabel(self.translator.translate('setting_overwrite_matrix'))
 
         self.Layout()
         self.Refresh()
@@ -1037,20 +1756,36 @@ class LogTab(wx.Panel):
         #
 
         # ==== Logging =====
-        path_logfile = Path(__file__)
-        path_logfile = path_logfile.name.replace(".py", ".log")
+        log_name = Path(__file__).name.replace(".py", ".log")
+        log_dir = Path(__file__).resolve().parent.parent / "log"
+        try:
+            visum_log_dir = Path(self.visum.GetPath(57)) if self.visum is not None else None
+            if visum_log_dir and visum_log_dir.is_dir():
+                log_dir = visum_log_dir
+        except Exception:
+            pass
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            path_logfile = log_dir / log_name
+        except OSError:
+            path_logfile = Path(log_name)
         self.logger = logging.getLogger()
         self.logger.setLevel(logging.INFO)
         logger_format = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%d.%m.%Y %I:%M:%S %p")
 
-        # Output in Konsole & Logfile
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(logger_format)
-        file_handler = logging.FileHandler(path_logfile, mode="w")
+        # Clear any stale handlers (e.g. from prior runs in the same Visum Python session or
+        # StreamHandlers targeting Visum's redirected sys.stderr, which deadlocks wx.MainLoop).
+        for existing_h in self.logger.handlers[:]:
+            self.logger.removeHandler(existing_h)
+            try:
+                existing_h.close()
+            except Exception:
+                pass
+
+        # Output to Logfile & GUI Log-Tab (avoid sys.stderr StreamHandler inside Visum UI)
+        file_handler = logging.FileHandler(path_logfile, mode="w", encoding="utf-8")
         file_handler.setFormatter(logger_format)
-        # add handles to logger
         self.logger.addHandler(file_handler)
-        self.logger.addHandler(stream_handler)
 
         self.log = wx.TextCtrl(self, wx.ID_ANY, size=(700, 200),
                                style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.EXPAND)
@@ -1145,7 +1880,7 @@ class HelpPopUp(wx.Frame):
         dict_docu = {
             translator.translate('application'): doc_dir / "application.html",
             translator.translate('foundations'): doc_dir / "foundations.html",
-            translator.translate('documentation_code'): doc_dir.parent / "code" / "html" /"index.html"
+            translator.translate('documentation_code'): doc_dir.parent / "code" / "html" / "index.html",
         }
 
         # Create tabs with embedded WebView for each documentation page
@@ -1181,133 +1916,14 @@ class HelpPopUp(wx.Frame):
 
 
 
-## @class LoadingSplash
-#a loading screen to show the tool is responding
-class LoadingSplash(wx.Frame):
-
-    # ---- colours & geometry ------------------------------------------------
-    _BG        = wx.Colour(28,  28,  34)
-    _BAR_BG    = wx.Colour(55,  55,  65)
-    _BAR_FG    = wx.Colour(70, 130, 220)
-    _WHITE     = wx.Colour(255, 255, 255)
-    _GREY      = wx.Colour(160, 160, 175)
-    _HINT      = wx.Colour(100, 100, 115)
-
-    W, H       = 440, 210
-    BAR_W      = 360
-    BAR_H      = 12
-    BAR_X      = (W - BAR_W) // 2
-    BAR_Y      = 138
-    BLOCK_LEN  = 90
-    STEP_PX    = 5
-
-    ## Initializes and immediately paints the loading splash screen.
-    def __init__(self):
-        super().__init__(None,
-                         style=wx.BORDER_NONE | wx.STAY_ON_TOP | wx.FRAME_NO_TASKBAR)
-        self.SetClientSize((self.W, self.H))
-        self.Centre()
-
-        self._pos  = 0
-        self._hint = "Starting up\u2026"
-
-        self.Bind(wx.EVT_PAINT,            self._on_paint)
-        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda e: None)  # prevent grey flash
-
-
-        self._timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_timer, self._timer)
-        self._timer.Start(40)
-
-
-        self.Show()
-        self.Refresh()
-        self.Update()
-        wx.SafeYield()
-
-    # -----------------------------------------------------------------------
-    def _on_timer(self, _event):
-        """Advance the bar position and request a repaint on every tick."""
-        self._pos = (self._pos + self.STEP_PX) % (self.BAR_W + self.BLOCK_LEN)
-        self.Refresh()
-        self.Update()
-
-    # -----------------------------------------------------------------------
-    def _on_paint(self, _event):
-        """Draw the entire splash content via DC """
-        dc = wx.PaintDC(self)
-        w  = self.W
-
-        # Background
-        dc.SetBackground(wx.Brush(self._BG))
-        dc.Clear()
-
-        # Title
-        dc.SetFont(wx.Font(15, wx.FONTFAMILY_DEFAULT,
-                           wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        dc.SetTextForeground(self._WHITE)
-        title = "Direct Line Network Tool"
-        dc.DrawText(title, (w - dc.GetTextExtent(title)[0]) // 2, 28)
-
-        # Subtitle
-        dc.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT,
-                           wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        dc.SetTextForeground(self._GREY)
-        sub = "Initializing, please wait\u2026"
-        dc.DrawText(sub, (w - dc.GetTextExtent(sub)[0]) // 2, 66)
-
-        # Bar track
-        dc.SetPen(wx.TRANSPARENT_PEN)
-        dc.SetBrush(wx.Brush(self._BAR_BG))
-        dc.DrawRoundedRectangle(self.BAR_X, self.BAR_Y, self.BAR_W, self.BAR_H, 6)
-
-        # Animated gliding block
-        block_x = self.BAR_X + self._pos - self.BLOCK_LEN
-        clip_x  = max(block_x, self.BAR_X)
-        clip_w  = min(block_x + self.BLOCK_LEN, self.BAR_X + self.BAR_W) - clip_x
-        if clip_w > 0:
-            dc.SetBrush(wx.Brush(self._BAR_FG))
-            dc.DrawRoundedRectangle(clip_x, self.BAR_Y, clip_w, self.BAR_H, 6)
-
-        # Hint text (current loading phase)
-        dc.SetFont(wx.Font(8, wx.FONTFAMILY_DEFAULT,
-                           wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        dc.SetTextForeground(self._HINT)
-        dc.DrawText(self._hint,
-                    (w - dc.GetTextExtent(self._hint)[0]) // 2,
-                    self.BAR_Y + self.BAR_H + 14)
-
-
-
-    #  @param text Short description of the current loading phase.
-    def set_hint(self, text: str):
-        self._hint = text
-        self.Refresh()
-        self.Update()
-        wx.SafeYield()  # let the timer fire at least once before blocking again
-
-    ## Stops the timer and destroys the splash window.
-    def close(self):
-        self._timer.Stop()
-        self.Destroy()
-
-
 if __name__ == '__main__':
-    # Initialize translator outside the app
-    translator = Translator(Path(__file__).parent / "Translations.json", language="en")
+    # Initialize translator using PANDO's helper_files/translations.json (with local fallback)
+    _translations_path = (
+        (_PANDO_HELPER_DIR / "translations.json")
+        if (_PANDO_HELPER_DIR is not None and (_PANDO_HELPER_DIR / "translations.json").is_file())
+        else (Path(__file__).parent / "translations.json")
+    )
+    translator = Translator(_translations_path, language="en")
     app = wx.App()
-
-    # Show the splash *before* any heavy work.  The timer starts inside __init__
-    # but will only fire while the event loop is running (MainLoop or SafeYield).
-    splash = LoadingSplash()
-
-    # Defer the actual initialization via CallLater so that MainLoop() is already running when the heavy work starts.  This means the splash timer fires freely for the first 100 ms and then continues to fire at every wx.SafeYield() call that is placed inside the heavy init steps.
-    def _do_init():
-        global frame
-        splash.set_hint("Loading Visum connection\u2026")
-        frame = DirectLineNetworkToolFrame(translator)
-        splash.set_hint("Ready.")
-        wx.CallAfter(splash.close)
-
-    wx.CallLater(100, _do_init)
+    frame = DirectLineNetworkToolFrame(translator)
     app.MainLoop()
