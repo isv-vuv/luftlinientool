@@ -1,4 +1,4 @@
-﻿## @package dlnt_GUI
+## @package dlnt_GUI
 # @brief Graphical User Interface for the Direct-Line Network Tool
 #
 # This class provides a graphical interface for the Direct Line Network Tool (DLNT),
@@ -43,8 +43,6 @@ import wx
 import wx.grid
 import wx.html2
 import logging
-import json
-import os
 import warnings
 
 import cfl_directlinenetwork_tool as dlnt
@@ -455,60 +453,6 @@ class _CenteredBoolRenderer(wx.grid.GridCellRenderer):
         return _CenteredBoolRenderer()
 
 
-# ---------------------------------------------------------------------------
-# Shared config reader  (rin_config.json written by RIN_Matrizen.py)
-# ---------------------------------------------------------------------------
-
-def _load_rin_config(visum=None):
-    """
-    Load rin_config.json from the directory of the open VISUM file.
-    Returns a list of five dicts, each with keys "n" and "v", one per CFL
-    tier (index 0 = CFL 0, …, index 4 = CFL 4).
-
-    Falls back to default values (n=2, v=1 for every tier) if the file is
-    absent or unreadable, so the GUI behaves exactly as before for users who
-    have not yet run RIN_Matrizen.py with the new dialog.
-
-    Parameters
-    ----------
-    visum : optional
-        A live Visum COM object.  Its GetPath(1) gives the directory of the
-        open .ver file – the canonical location for rin_config.json.
-        Falls back to the current working directory when None.
-
-    Returns
-    -------
-    list of dict  – five entries, each {"n": int, "v": int}.
-    """
-    _defaults = [{"n": 2, "v": 0}] * 5
-    try:
-        if visum is not None:
-            ver_path = visum.GetPath(1)
-            search_dir = os.path.dirname(ver_path) if ver_path else os.getcwd()
-        else:
-            search_dir = os.getcwd()
-
-        config_path = os.path.join(search_dir, "rin_config.json")
-        if os.path.isfile(config_path):
-            with open(config_path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            params = data.get("cfl_params")
-            if isinstance(params, list) and len(params) == 5:
-                result = [
-                    {
-                        "n": int(params[i].get("n", 2)),
-                        "v": int(params[i].get("v", 1)),
-                    }
-                    for i in range(5)
-                ]
-                logging.info(
-                    "dlnt_GUI: loaded per-CFL params from {}".format(config_path))
-                return result
-    except Exception as exc:
-        logging.warning(
-            "dlnt_GUI: could not read rin_config.json – {}".format(exc))
-    return [dict(d) for d in _defaults]
-
 # ===== Helper Functions =====
 ## Loads all Visum zone attributes.
 #  @param Visum The Visum instance to get attributes from.
@@ -578,23 +522,6 @@ class DirectLineNetworkToolFrame(wx.Frame):
         self.visum = Visum
         _configure_file_logging(self.visum)
         self.list_attr = get_attr_zones(self.visum)
-
-        # ── Read shared config (written by RIN_Matrizen.py) ──────────────
-        # _rin_cfl_params is a list of five {"n", "v"} dicts, one per CFL tier.
-        # The v values pre-populate the supplier spinners (cfl_0 … cfl_4) so
-        # the user sees the values they entered in the earlier workflow step.
-        # cfl_5 has no matching RIN tier – it keeps the previous default (0).
-        # The user can still override any value in the GUI at any time.
-        self._default_no_supplier_per_cfl = {
-            "cfl_0": 0,
-            "cfl_1": 0,
-            "cfl_2": 0,
-            "cfl_3": 0,
-            "cfl_4": 0,
-            "cfl_5": 0,
-        }
-        logging.info("dlnt_GUI: per-CFL default suppliers: {}".format(
-            self._default_no_supplier_per_cfl))
 
         self.attr_origin = None
         self.attr_destination = None
@@ -730,12 +657,8 @@ class DirectLineNetworkToolFrame(wx.Frame):
         self.buttons_value_k_neighbor_cfl['cfl_4'].SetValue(self.default_k_neighbor)
         self.buttons_value_k_neighbor_cfl['cfl_5'].SetValue(self.default_k_neighbor)
 
-        # Apply per-CFL supplier defaults from rin_config.json when available,
-        # otherwise fall back to the single global default_no_supplier value.
-        _per_cfl = getattr(self, '_default_no_supplier_per_cfl', None)
         for key in ('cfl_0', 'cfl_1', 'cfl_2', 'cfl_3', 'cfl_4', 'cfl_5'):
-            v = _per_cfl[key] if _per_cfl is not None else self.default_no_supplier
-            self.buttons_value_n_supplier[key].SetValue(v)
+            self.buttons_value_n_supplier[key].SetValue(self.default_no_supplier)
 
         self.cb_cfl.SetValue("TypeNo")
         self.cb_origin.SetSelection(0)
@@ -906,45 +829,6 @@ class DirectLineNetworkToolFrame(wx.Frame):
 
         self.SetStatusText(self.translator.translate('status_results_deleted_may_reimport'))
 
-    ## Event handler for exporting all results.
-    #  Exports both the network and matrix results from the calculator if it exists.
-    #  @param event The event object.
-    def event_export_results(self, event):
-        if self.dln_calculator is not None:
-            self.update_param_cfl()
-            self.dln_calculator.export_net(links_additive=True)
-            self.dln_calculator.export_matrix()
-
-    ## Event handler for exporting network results for a specific CFL level.
-    #  Exports the network results for the specified CFL level, deletes unused nodes,
-    #  and updates the status bar with the CFL level that was exported.
-    #  @param event The event object containing the CFL level to export.
-    def event_export_net(self, event):
-        cfl_level = event.GetEventObject().cfl
-        cfl_name = self.button_cfl_active[cfl_level].Label
-
-        if self.dln_calculator is not None:
-            self.update_param_cfl()
-            self.dln_calculator.export_net(links_additive=True, list_cfl=[cfl_level])
-            self.dln_calculator.delete_unused_nodes()
-
-        self.SetStatusText(f"{cfl_name}: {self.translator.translate('status_net_exported_imported')}")
-
-    ## Event handler for exporting matrix results for a specific CFL level.
-    #  Exports the matrix results for the specified CFL level and updates the status bar
-    #  with the CFL level that was exported.
-    #  @param event The event object containing the CFL level to export.
-    def event_export_mtx(self, event):
-        cfl_level = event.GetEventObject().cfl
-        cfl_name = self.button_cfl_active[cfl_level].Label
-
-        if self.dln_calculator is not None:
-            self.update_param_cfl()
-            overwrite = bool(self.tabMain.cb_overwrite_matrix.GetValue())
-            self.dln_calculator.export_matrix(list_cfl=[cfl_level], overwrite_existing=overwrite)
-
-        self.SetStatusText(f"{cfl_name}: {self.translator.translate('status_matrix_loaded_into_visum')}")
-
     ## Event handler for exporting all results at once.
     #  Exports both matrix and network results for all CFL levels, deletes unused nodes,
     #  and updates the status bar.
@@ -1095,8 +979,6 @@ class DirectLineNetworkToolFrame(wx.Frame):
         # 1. Update main window title & header
         title = self.translator.translate('app_title')
         self.SetTitle(title)
-        if hasattr(self, "lbl_header_title"):
-            self.lbl_header_title.SetLabel(title)
 
         # 2. Update side panel controls
         self.lang_toggle.set_selected(self.translator.get_selected_language())
