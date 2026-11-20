@@ -1300,8 +1300,10 @@ class MainTab(wx.Panel):
 
         grid_h = 46 + len(self._cfl_keys) * 32
         self.cfl_grid.SetMinSize((44 + 5 * self._min_data_col_w, grid_h))
-        grid_border_sizer.Add(self.cfl_grid, 1, wx.EXPAND | wx.ALL, 1)
+        self.cfl_grid.SetMaxSize((-1, grid_h))
+        grid_border_sizer.Add(self.cfl_grid, 0, wx.EXPAND | wx.ALL, 1)
         grid_border.SetSizer(grid_border_sizer)
+        grid_border.SetMaxSize((-1, grid_h + 2))
 
         # Share references with TopLevelParent
         self.TopLevelParent.button_cfl_active = self.button_cfl_active
@@ -1309,7 +1311,8 @@ class MainTab(wx.Panel):
         self.TopLevelParent.buttons_value_k_neighbor_cfl = self.buttons_value_k_neighbor_cfl
         self.TopLevelParent.buttons_value_n_supplier = self.buttons_value_n_supplier
 
-        self._gridbox_sizer.Add(grid_border, 1, wx.EXPAND | wx.BOTTOM, 10)
+        self._gridbox_sizer.Add(grid_border, 0, wx.EXPAND | wx.BOTTOM, 10)
+        self._gridbox_sizer.AddStretchSpacer(1)
 
         # Clean 1px hairline divider above bottom strip
         calc_div = wx.Panel(cfl_card, size=(-1, 1), style=wx.NO_BORDER)
@@ -1542,9 +1545,10 @@ class MainTab(wx.Panel):
         return sorted(cells)
 
     def _apply_row_visual_state(self, row: int, enabled: bool):
-        """Apply uniform white (active) or soft gray (inactive) background across ALL 6 columns."""
+        """Keep checkbox column (col 0) white; toggle cols 1..5 between white (active) and soft gray (inactive)."""
+        self.cfl_grid.SetCellBackgroundColour(row, 0, _UI_CARD)
         bg = _UI_CARD if enabled else _UI_DISABLED_BG
-        for col in range(6):
+        for col in range(1, 6):
             self.cfl_grid.SetCellBackgroundColour(row, col, bg)
         self.cfl_grid.SetCellTextColour(row, 1, _UI_TEXT if enabled else _UI_DISABLED_FG)
 
